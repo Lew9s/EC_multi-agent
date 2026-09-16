@@ -13,6 +13,9 @@ Invariants enforced in this module
    expert cannot inflate the score (fixes the defect found in CDIACR).
 4. No evidence -> no expert dispatch (the no-history branch).
 5. An expert never sees another expert's judgment or the session history.
+6. A round that adds no evidence and moves no prompt-affecting field is a fixed
+   point: it is reported as ``stalled`` instead of being silently bounded by
+   ``max_rounds`` (D-81/D-82).
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from .contracts import (
     IntentCompletion,
     RunInput,
     RunResult,
+    StallReport,
     SubQuestion,
     Usage,
 )
@@ -244,6 +248,73 @@ def consensus(
 
 
 # --------------------------------------------------------------------------- #
+# Stage 4b — fixed-point detection
+# --------------------------------------------------------------------------- #
+
+
+def projected_fingerprint(opinion: ExpertOpinion) -> tuple:
+    """Exactly the fields that reach the *next* round's prompt (§5.4.4, D-81).
+
+    Included:
+
+    * ``decision`` — drives the consensus score and the disclosed dissent count;
+    * ``evidence_ids`` and ``rationale`` — come back to their own author through
+      ``RevisionContext.own_previous``;
+    * ``claims`` by ``claim_id`` — these reach *peers* through ``CrossAgentInfo``,
+      and comparing ids rather than text makes the check immune to whitespace
+      noise (D-78);
+    * ``constraints`` — these reach every peer unconditionally (D-56).
+
+    Excluded on purpose: ``uncertainties`` / ``risk_level`` / ``confidence`` /
+    ``assurance`` / ``partial``. Nothing renders them into a prompt, so a change
+    in them cannot alter any later round — only the final report, which is built
+    from the opinions already in hand.
+    """
+    return (
+        opinion.decision,
+        tuple(sorted(opinion.evidence_ids)),
+        tuple(sorted(claim.claim_id for claim in opinion.claims)),
+        tuple(sorted(opinion.constraints)),
+        opinion.rationale,
+    )
+
+
+def detect_stall(
+    previous: dict[str, ExpertOpinion],
+    current: dict[str, ExpertOpinion],
+    previous_baseline: Sequence[str],
+    current_baseline: Sequence[str],
+) -> bool:
+    """True when the next round could only repeat this one (§5.4.4, D-81).
+
+    Both conditions are necessary:
+
+    * **no new evidence** — the frozen baseline is unchanged, so every expert
+      sees the same facts;
+    * **no change in any prompt-affecting field** — so the only difference left
+      in the next prompt is the round counter in its CTX header.
+
+    This is why the check needs no threshold, unlike oscillation detection, and
+    can therefore act immediately. The honest limit: because that counter *is*
+    in the prompt, this establishes "no further information gain", not a
+    byte-level proof of identical output — see docs/design.md §5.4.4.
+
+    The alternative it replaces is worse either way: continuing yields the same
+    opinions (a loop that only ``max_rounds`` stops), or yields different ones
+    *because of a semantically empty counter* — which would mean enshrining
+    sensitivity to an irrelevant number.
+    """
+    if set(current_baseline) - set(previous_baseline):
+        return False
+    if set(previous) != set(current):
+        return False
+    return all(
+        projected_fingerprint(previous[expert]) == projected_fingerprint(current[expert])
+        for expert in current
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Stage 5 — rendering
 # --------------------------------------------------------------------------- #
 
@@ -392,13 +463,20 @@ async def run(
     ctx.events.emit("experts_selected", active=active, weights=weights)
 
     # --- stage 4: consensus rounds --------------------------------------- #
-    baseline = ctx.registry.all_ids()
     opinions_by_round: dict[int, dict[str, ExpertOpinion]] = {}
     latest: dict[str, ExpertOpinion] = {}
+    previous: dict[str, ExpertOpinion] = {}
+    previous_baseline: list[str] = []
+    stall = StallReport()
     score, effective, status = 0.0, 0, "retry"
     round_no = 0
 
     for round_no in range(1, max_rounds + 1):
+        # Recomputed every round, not once outside the loop: evidence registered
+        # *during* a run (human facts today, EvidenceRequest later) belongs in
+        # the next frozen baseline. Freezing one snapshot up front also made the
+        # "no new evidence" half of the stall test vacuously true.
+        baseline = ctx.registry.all_ids()
         ctx.registry.freeze(round_no, baseline)
         ctx.events.emit("round_started", round=round_no, experts=active)
 
@@ -441,6 +519,28 @@ async def run(
         if status != "retry":
             break
 
+        # --- fixed point (D-81) ------------------------------------------- #
+        # Only meaningful from round 2 on: round 1 -> 2 also changes `mode`,
+        # `revision` and `cross_agent` structurally, so their prompts differ for
+        # reasons that have nothing to do with information gain.
+        if previous and detect_stall(previous, round_opinions, previous_baseline, baseline):
+            stall = StallReport(
+                stalled=True,
+                detected_at_round=round_no,
+                skipped_rounds=max_rounds - round_no,
+                unchanged_experts=sorted(round_opinions),
+            )
+            ctx.events.emit("stalled", round=round_no, experts=stall.unchanged_experts)
+            ctx.events.emit("stall_skipped", skipped_rounds=stall.skipped_rounds)
+            # Not `manual_review`: no expert is still disagreeing, the process
+            # has simply stopped producing information (§5.6.1).
+            status = "stalled"
+            warnings.append("stalled")
+            break
+
+        previous = dict(round_opinions)
+        previous_baseline = baseline
+
     if status == "retry":
         status = "manual_review"
         warnings.append("max_rounds_reached")
@@ -480,6 +580,7 @@ async def run(
         active_experts=active,
         consensus_score=score,
         consensus_status=status,  # type: ignore[arg-type]
+        stall=stall,
         grounding=grounding,
         assurance=assurance,
         usage=total_usage,

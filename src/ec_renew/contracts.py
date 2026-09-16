@@ -532,6 +532,26 @@ class LLMResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class StallReport(BaseModel):
+    """Deterministic fixed-point detection (§5.4.4, D-81/D-82).
+
+    A round that adds no evidence and changes no prompt-affecting field cannot
+    make the *next* round any different, so iterating further buys nothing.
+    Reported separately from a bare status because the human needs to see that
+    this is "the process has stopped producing information", not "the experts
+    still disagree" (§5.6.1).
+
+    Oscillation findings will be added by their own change: their threshold is
+    not calibrated yet, so they may be recorded but must not steer control flow
+    (D-81).
+    """
+
+    stalled: bool = False
+    detected_at_round: int = 0
+    skipped_rounds: int = 0
+    unchanged_experts: list[str] = Field(default_factory=list)
+
+
 class RunResult(BaseModel):
     request: str
     normalized_request: str
@@ -539,7 +559,8 @@ class RunResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     active_experts: list[str] = Field(default_factory=list)
     consensus_score: float = 0.0
-    consensus_status: Literal["approved", "manual_review"] = "manual_review"
+    consensus_status: Literal["approved", "manual_review", "stalled"] = "manual_review"
+    stall: StallReport = Field(default_factory=StallReport)
     grounding: Grounding = Field(default_factory=Grounding)
     assurance: AssuranceLevel = Field(default_factory=AssuranceLevel)
     usage: Usage = Field(default_factory=Usage)
