@@ -18,13 +18,13 @@ import sys
 import uuid
 
 from .config import settings
-from .contracts import HumanDecision, HumanProvidedFact, RunInput, TurnSummary
+from .contracts import HumanDecision, HumanProvidedFact, RunInput
 from .llm import FakeLLM
 from .memory import EvidenceRegistry
 from .observability import JsonlEventLog
 from .ports import RunContext
 from .rag import InMemoryRetriever
-from .session import SessionState
+from .session import SessionState, summarize
 from .workflow import run
 
 
@@ -111,16 +111,10 @@ async def _one_turn(
         print(f"[警告] {list(result.warnings)}")
         print(f"[检索] {retriever_notes[0]}")
 
-    session.append(
-        TurnSummary(
-            turn=len(session.turns) + 1,
-            user_request=request,
-            conclusion=result.conclusion.splitlines()[0] if result.conclusion else "",
-            confirmed_experts=result.active_experts,
-            evidence_ids=result.evidence_ids,
-            assurance=result.assurance,
-        )
-    )
+    # Built from the run's fields, never from the rendered report: its first line
+    # is a constant title, so deriving the summary from it stored the same string
+    # on every turn. See session.summarize.
+    session.append(summarize(result, turn=len(session.turns) + 1))
 
 
 async def _repl(
