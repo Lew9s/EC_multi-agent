@@ -96,3 +96,34 @@ def test_secret_scan_still_fails_on_a_real_leak(scratch_repo: Path) -> None:
     stdout = result.stdout.decode("utf-8", errors="replace")
     assert result.returncode == 1, stdout
     assert "疑似密钥泄漏" in stdout
+
+
+def test_a_shebang_implies_the_executable_bit() -> None:
+    """``ruff`` 的 EXE001 只在 Linux 触发，这里给它做一个本地代理。
+
+    Windows 看不到 POSIX 可执行位，于是「有 shebang、但 git 索引里是 100644」的文件
+    在本地永远绿、只在 CI 红 —— AGENTS.md §1.3 专门警告过这个坑，而 PR #7 的第一轮
+    CI 正是这样红的（`scripts/_console.py` 多带了一个 shebang）。这里改从 git 索引读
+    模式，让这个陷阱在本地就可见。
+
+    局限：只看**已跟踪**的文件。刚建好还没 `git add` 的脚本不在索引里，覆盖不到 ——
+    那属于 `git status` 该看的东西。
+    """
+    listing = subprocess.run(
+        ["git", "ls-files", "-s", "scripts"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    offenders: list[str] = []
+    for line in listing.splitlines():
+        meta, _, path = line.partition("\t")
+        mode = meta.split(maxsplit=1)[0]
+        if mode == "100644" and (ROOT / path).read_text(encoding="utf-8").startswith("#!"):
+            offenders.append(path)
+
+    assert not offenders, (
+        f"这些文件有 shebang 但 git 里不是可执行位（EXE001 只在 CI 暴露）：{offenders}"
+    )

@@ -1,5 +1,9 @@
-#!/usr/bin/env python3
 """脚本输出的编码兜底。
+
+本模块被 import，不作为脚本执行，因此**刻意不带 shebang**：带了就是 ruff 的
+EXE001（有 shebang 但文件没有可执行位），而这条规则**只在 Linux / CI 暴露** ——
+Windows 上 ruff 看不到 POSIX 可执行位，本地会一直是绿的（AGENTS.md §1.3 记着这个
+坑；本 PR 的第一次 CI 正是踩在它上面红的）。
 
 为什么需要它
 ------------
