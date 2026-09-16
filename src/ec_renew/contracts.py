@@ -554,23 +554,36 @@ class LLMResult(BaseModel):
 
 
 class StallReport(BaseModel):
-    """Deterministic fixed-point detection (§5.4.4, D-81/D-82).
+    """Iteration-stability findings (§5.4.4, D-81/D-82).
 
-    A round that adds no evidence and changes no prompt-affecting field cannot
-    make the *next* round any different, so iterating further buys nothing.
-    Reported separately from a bare status because the human needs to see that
-    this is "the process has stopped producing information", not "the experts
-    still disagree" (§5.6.1).
+    Two determinations share this report because both come out of the same
+    round-by-round data and both answer "is iterating further worth anything":
 
-    Oscillation findings will be added by their own change: their threshold is
-    not calibrated yet, so they may be recorded but must not steer control flow
-    (D-81).
+    * **fixed point** — a round adds no evidence and moves no prompt-affecting
+      field, so the *next* round could only repeat it. Reported separately from a
+      bare status because the human needs to see that this is "the process has
+      stopped producing information", not "the experts still disagree" (§5.6.1).
+    * **oscillation** — an expert reversed direction between adjacent rounds.
+      Recorded only: the threshold that should *trigger* an action is not
+      calibrated yet (Q-17), and a threshold cannot be calibrated without a
+      distribution to look at (D-81). Nothing here steers control flow.
+
+    ``reversals`` is that distribution — expert -> number of direction changes —
+    so a later change can pick between "≥1 reversal" and "≥2 consecutive
+    reversals" from real runs instead of from intuition. The per-round decision
+    matrix it is derived from is already in the event log (``round_finished``),
+    so this is a convenience view, not the only copy.
     """
 
     stalled: bool = False
     detected_at_round: int = 0
     skipped_rounds: int = 0
     unchanged_experts: list[str] = Field(default_factory=list)
+    # Recorded, never acted upon yet (D-81). `reused_from_round` — the field the
+    # interception path will need — is deliberately absent until then: adding it
+    # now would imply opinions are being reused, and none are.
+    oscillating_experts: list[str] = Field(default_factory=list)
+    reversals: dict[str, int] = Field(default_factory=dict)
 
 
 class RunResult(BaseModel):

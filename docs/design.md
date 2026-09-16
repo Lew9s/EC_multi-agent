@@ -509,6 +509,13 @@ round N:
 
 **振荡检测的阈值尚未标定**（Q-17），故当前只实现检测、落事件、**先标不拦**：标定需要数据，而数据只能从记录里来。这与 C7 类阈值（Jaccard 归因阈值）遵循同一条纪律。
 
+**振荡的判据**（已实现，只记录）：把每位专家的决策序列投影到序轴 `reject < revise < approve` 上，**相邻两段方向相反**即计一次反向；`oscillating_experts` 收录反向次数 ≥ 1 的专家，`reversals` 记录逐人次数。四条边界：
+
+* **不复用 `DECISION_SCORES`**：那是共识计分用的，其中 `abstain` 与 `reject` 同为 `0.0`。复用会把「赞成 → 弃权 → 赞成」误判成反向 —— 弃权是**没有判断**，不是改了判断。
+* `abstain` **跳过而不截断**序列：「赞成 → 反对 → 弃权 → 赞成」确实来回了两次，弃权不改变这个事实。
+* 反向需要**两个相邻步**，因此最早第 3 轮才可能检出。这也意味着拦截若要在第 N 轮生效，`max_rounds` 至少得是 N+1，否则拦截与不拦截**无法区分**（用例为此专门跑 4 轮）。
+* 逐轮决策矩阵本来就在事件日志里（`round_finished`），`oscillation_observed` 与 `StallReport.reversals` 只是把它算成一个**可标定的分布**：Q-17 要在「≥ 1 次反向」与「连续 2 次反向」之间决断，靠的就是这个分布，而不是拍脑袋。
+
 复用旧意见会使共识输入出现**混合新鲜度**，必须标注每条意见来自第几轮（§5.2.7），否则共识分不可解释。
 
 #### 5.4.5 与子智能体的边界：零自由文本
@@ -1124,13 +1131,15 @@ class RevisionProposal(BaseModel):       # 意图 / query 集修订提案（§5.
     changes: list[str]
     evidence_ids: list[str]                # 依据，必须可回溯
 
-class StallReport(BaseModel):            # 不动点的确定性判定（§5.4.4）
+class StallReport(BaseModel):            # 迭代稳定性的确定性判定（§5.4.4）
     stalled: bool = False
     detected_at_round: int = 0             # 判定发生在第几轮之后
     skipped_rounds: int = 0                # 因停滞而跳过的剩余轮次
     unchanged_experts: list[str] = []      # 判据：这些专家的投影字段全部零变化
-    # 振荡的字段（oscillating_experts / reused_from_round）由它自己的变更加入：
-    # 阈值尚未标定，可以先记录，但不得驱动控制流（D-81）
+    # 振荡：只记录，不驱动控制流（D-81）。`reused_from_round` 是拦截路径才需要的
+    # 字段，在拦截落地前刻意不设 —— 加了就等于宣称「有意见被复用」，而并没有。
+    oscillating_experts: list[str] = []    # 反向次数 ≥ 1 的专家
+    reversals: dict[str, int] = {}         # 逐人反向次数：Q-17 标定所用的分布
 ```
 
 `ExpertTask` 修订（新增 `mode` / `revision` / `cross_agent` 与归属断言）：
@@ -1805,6 +1814,7 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 | D-84 | **harness（`AgentRuntime`）先于 kernel** 实现 | kernel 的挂起/恢复要求 agent 状态可序列化；无 `StepRecord` seam 则 harness 需重写。当前 `TaskGroup` + JSONL 已覆盖 demo 规模的调度 | `[已定]` |
 | D-85 | `StepRecord` 位置寻址回放与 `LLMCache` 内容寻址缓存**严格分离**，replay 优先 | 混用会在清缓存后重复付费，或把「同一位置的旧结果」当作「同一输入的结果」 | `[已定]` |
 | D-86 | 机器可读的调用上下文（expert / round / mode）用 `LLMCallMeta` **带外**传给 LLM 端口，**永不进消息内容**，且**必须参与缓存键** | 上下文一旦进了 prompt 就不再是「元信息」而是模型输入：它把 `stalled` 的论证从「可证明的输出相同」降回「无信息增益」（D-81），并让 prompt 前缀随轮次漂移、KV cache 失效。反向的坑同样致命：移出带外却不折进缓存键，第 2 轮会命中第 1 轮的缓存答案——同一份 prompt 文本、两个不同的问题（`LLMCache.key` 有专门用例钉住） | `[已定]` |
+| D-87 | 振荡判据 = 决策序列在**序轴** `reject < revise < approve` 上的相邻反向；`abstain` **跳过而不截断**序列；因此最早第 3 轮才可能检出 | 不能复用 `DECISION_SCORES`：那是共识计分用的，`abstain` 与 `reject` 同为 `0.0`，复用会把「赞成→弃权→赞成」误判成反向——弃权是**没有判断**，不是改了判断。跳过而非截断，是因为「赞成→反对→弃权→赞成」确实来回了两次。三个限制合起来决定了两件事：拦截要在第 N 轮生效则 `max_rounds ≥ N+1`，且 Q-17 的阈值只能从这个**分布**（`reversals`）标定，不能拍脑袋 | `[已定]` |
 
 ---
 
@@ -1875,4 +1885,4 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 *本文件为讨论中的设计基线，随讨论更新。修改时请同时更新 §10 决策记录与 §11 待决事项的状态。*
 
-*最近一次修订：把机器可读的调用上下文移出 prompt（§12 1f / D-86）。修订要点：删除 `[[CTX …]]` 头，expert / round / mode 经 `LLMCallMeta` **带外**传给 `LLMPort.complete` 并**折进 `LLMCache.key`**；`stalled` 的论证由「无信息增益」升级为**字节级可证明**（§5.4.4），prompt 前缀在轮次间稳定。再上一轮为元智能体架构（D-70…D-85）。*
+*最近一次修订：振荡检测的判据与记录（§5.4.4 / D-87）。修订要点：判据定为序轴 `reject < revise < approve` 上的**相邻反向**，`abstain` 跳过而不截断（因此最早第 3 轮才可能检出）；`StallReport` 增 `oscillating_experts` 与 `reversals`，只记录、不驱动控制流（D-81），`reused_from_round` 在拦截落地前刻意不设。再上一轮为把调用上下文移出 prompt（§12 1f / D-86），更早一轮为元智能体架构（D-70…D-85）。*
