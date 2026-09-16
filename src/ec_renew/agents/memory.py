@@ -24,11 +24,14 @@ from ..contracts import (
     EvidenceRef,
     ExpertOpinion,
     ExpertTask,
+    MemoryView,
     ProjectionRecord,
     ReviewFeedback,
     RevisionContext,
+    RoundFold,
     SubQuestion,
 )
+from ..errors import InvariantViolation
 
 
 def make_evidence_id(source: str, content: str) -> str:
@@ -163,6 +166,48 @@ class MemoryService:
             conflicts=tuple(collect_claims(opinions)),
             hard_constraints=tuple(collect_hard_constraints(opinions)),
         )
+
+    def read_view(
+        self,
+        view: str,
+        *,
+        round_no: int,
+        opinions: Iterable[ExpertOpinion] = (),
+        folds: Iterable[RoundFold] = (),
+    ) -> MemoryView:
+        """``read_memory`` 的枚举视图（§5.4.11 / D-91）：参数与返回**都不含自由文本**。
+
+        与 ``read()`` 的分工：``read()`` 是外环内部用的 ``MemorySlice``；本方法是
+        元智能体的 observe 入口，返回可枚举、可机检的三个视图——``baseline``（L3
+        证据 id 与计数）、``opinions``（本轮各专家的**决策**，不含论证原文）、
+        ``rounds``（L4 的确定性折叠）。明细按需取，绝不做 LLM 摘要（D-74）。
+        """
+        opinions = list(opinions)
+        if view == "baseline":
+            ids = self._reg.baseline(round_no)
+            return MemoryView(
+                view="baseline",
+                round=round_no,
+                evidence_ids=ids,
+                counts={"baseline": len(ids), "registry": len(self._reg.all_ids())},
+            )
+        if view == "opinions":
+            return MemoryView(
+                view="opinions",
+                round=round_no,
+                decisions={
+                    op.expert: op.decision for op in sorted(opinions, key=lambda o: o.expert)
+                },
+                counts={
+                    "opinions": len(opinions),
+                    "abstain": sum(1 for op in opinions if op.decision == "abstain"),
+                    "claims": sum(len(op.claims) for op in opinions),
+                },
+            )
+        if view == "rounds":
+            return MemoryView(view="rounds", round=round_no, folds=list(folds))
+        # 守卫在 judge() 里已经按 VALID_VIEWS 拦过一道；走到这里说明两处清单不一致。
+        raise InvariantViolation(f"未知的 read_memory 视图：{view!r}")
 
     def project(
         self,

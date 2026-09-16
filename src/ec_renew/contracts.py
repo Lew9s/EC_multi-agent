@@ -602,6 +602,124 @@ class RunResult(BaseModel):
     rounds: int = 0
 
 
+# --------------------------------------------------------------------------- #
+# Orchestration (design.md §5.4 / §6.6.1 — D-70…D-91)
+# --------------------------------------------------------------------------- #
+
+AgentKind = Literal["meta", "expert"]
+StepKind = Literal["think", "act", "observe", "llm", "tool", "guard"]
+MetaAction = Literal[
+    "read_memory",
+    "dispatch_experts",
+    "request_evidence",
+    "attribute",
+    "ask_human",
+    "finalize",
+]
+
+#: 元智能体动作空间的**封闭枚举**（§5.4.1）。守卫按它校验，未知动作一律拒绝。
+META_ACTIONS: tuple[str, ...] = (
+    "read_memory",
+    "dispatch_experts",
+    "request_evidence",
+    "attribute",
+    "ask_human",
+    "finalize",
+)
+
+
+class StepRecord(BaseModel):
+    """位置寻址回放的最小单位（§9.4 / D-85）。
+
+    每次 think / act / observe / llm / tool / guard 都要落一条，且**在动作执行前**
+    先落盘：进程若在动作中途崩掉，重放靠它判断「这一步是否已经付过费」。因此事件
+    日志里成对出现——执行前 ``step``，执行后 ``step_done``（append-only 的 JSONL
+    改不了前一条，见 ``agents/runtime.py``）。
+    """
+
+    run_id: str
+    node: str = ""  # "meta" / "dispatch" / "expert:E01" / "guard"
+    round: int = 0
+    step: int = 0  # 该节点内的步序，从 0 起
+    kind: StepKind = "think"
+    args_hash: str = ""  # 参数指纹（不含自由文本原文）
+    produced_ids: list[str] = Field(default_factory=list)
+    outcome: Literal["ok", "rejected", "failed"] = "ok"
+
+
+class ActionProposal(BaseModel):
+    """元智能体每一步的产出：**提案，不是执行**（D-71）。
+
+    ``rationale`` 只进事件日志与审计，**永不进任何子智能体 prompt**（D-76）。
+    """
+
+    action: MetaAction
+    payload: dict = Field(default_factory=dict)
+    rationale: str = ""
+
+
+class GuardVerdict(BaseModel):
+    """守卫对一份提案的裁定。守卫是全局状态的**唯一写者**（§5.4.2）。"""
+
+    action: Literal["accept", "correct", "reject"] = "accept"
+    corrections: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class EvidenceRequest(BaseModel):
+    """事实性检索请求（agent → 守卫）。只能在**下一轮**生效（D-16）。"""
+
+    expert: str = "meta"
+    query: str
+    reason: str
+    scope: Literal["components", "departments", "cases", "standards"] = "cases"
+    effective_round: int = 0
+
+
+class AttributionProposal(BaseModel):
+    """分歧归因（§5.2.6）：重叠度由守卫**确定性**算出，LLM 只在 mixed 边界介入。"""
+
+    round: int
+    kind: Literal["judgment", "evidence", "mixed"] = "judgment"
+    evidence_overlap: float = 0.0
+    divergent_evidence: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class RoundFold(BaseModel):
+    """L4 过程层的**确定性**折叠（D-74）：禁 LLM 摘要，只挑结构化字段。"""
+
+    round: int
+    consensus_score: float = 0.0
+    dissent_count: int = 0
+    active_experts: list[str] = Field(default_factory=list)
+
+
+class MemoryView(BaseModel):
+    """``read_memory`` 的返回：全为枚举与结构化字段，**不含自由文本**（§5.4.11）。
+
+    元智能体是唯一被授予全局记忆读权限的 agent（§8.4.4）；子智能体拿不到它。
+    """
+
+    view: Literal["baseline", "opinions", "rounds"] = "baseline"
+    round: int = 0
+    evidence_ids: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    decisions: dict[str, str] = Field(default_factory=dict)
+    folds: list[RoundFold] = Field(default_factory=list)
+
+
+class AgentOutcome(BaseModel):
+    """``AgentRuntime`` 一次执行的产出（§12 1b 在此定稿）。"""
+
+    agent: str
+    kind: AgentKind = "expert"
+    status: Literal["ok", "rejected", "abstained", "failed"] = "ok"
+    steps: int = 0
+    produced_ids: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
 class FailureEvent(BaseModel):
     code: str
     node: str
