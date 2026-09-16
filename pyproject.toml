@@ -21,9 +21,11 @@ dependencies = [
     "qdrant-client>=1.17,<1.18",
 ]
 
-[dependency-groups]
-# ruff 放进 dev：它是 AGENTS.md §1.3 的三条闸门之一，
-# 本地与 CI 必须用同一套工具，否则「本地绿、CI 红」会变成常态。
+[project.optional-dependencies]
+# dev 依赖必须写成 **extra**（而不是只用 PEP 735 的 [dependency-groups]）：
+# `pip install -e ".[dev]"` 只认 extra，pip < 25.1 会**静默忽略** dependency-groups
+# —— 装完不报错，但 pytest / ruff 根本没装上，CI 到第一条闸门才炸。
+# 因此这里以 extra 为唯一真源，不再重复声明一份 dependency-groups 以免漂移。
 dev = ["pytest>=7.4,<9", "ruff>=0.6"]
 
 [build-system]
