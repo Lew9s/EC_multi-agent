@@ -125,8 +125,10 @@ interface → workflow → agents / rag → ports → contracts
 - **实现顺序：harness（`AgentRuntime`）先于 kernel**。kernel 的挂起/恢复与预算熔断要求 agent 执行状态可序列化，故 harness 从第一天起就要按 `StepRecord`（§9.4）逐步落盘，否则 kernel 上马时必须重写 harness。
 - LLM 输出不得直接进入 `eval` / `exec`。
 
-**落地情况（十模块重构后）**：`interface/`（CLI）、`workflow.py`、`agents/`
-（`experts.py` / `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）已按上表归位；
+**落地情况（十模块重构 + harness 竖切后）**：`interface/`（CLI）、`workflow.py`（外环：前段准备 /
+中段守卫与记账 / 后段收尾）、`agents/`（`experts.py` 子智能体、`memory.py` Memory Controller、
+`runtime.py` harness、`guard.py` 守卫、`meta.py` 决策骨架）、`rag/`（领域图 `graph.py` + 摄取与检索
+管道）已按上表归位；
 `contracts` / `ports` / `config` / `errors` / `observability` / `llm` / `session` 仍在顶层
 （横切，或尚未成包）。`kernel/` 与 `integration/` **暂未建立**：前者按 D-84 排在 harness 之后；
 后者目前没有干净的接缝——第三方适配与 RAG 管道耦合在同一批文件里（`llama_index` 贯穿摄取与
@@ -446,6 +448,8 @@ round N:
 | `attribute` | 分歧归因（§5.2.6） | 先算证据重叠 Jaccard（确定性）；只允许 LLM 在 `mixed` 边界区间介入 |
 | `ask_human` | 前置 / 后置 HITL | 每 run 各 ≤ 1 次；**决定要不要进入 HITL、何时挂起的是外环**，不是元智能体 |
 | `finalize` | 收束，交外环后段 | `assurance` 必须成立（§5.7）；`evidence_ids` 非空；任一意见无支撑则拒绝并转 `manual_review` |
+
+> **实现现状（D-89…D-91）**：循环、六个 act、守卫判据与 `StepRecord` 已落地；**决策部分目前是规则骨架**（Q-06 三明治的第一层），LLM 补差集那一层未接。裁定（共识 / 停滞）由外环以回调注入，内环因此不 import 外环。
 
 #### 5.4.2 动作即请求，守卫即唯一写者
 
@@ -1825,6 +1829,10 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 | D-87 | 振荡判据 = 决策序列在**序轴** `reject < revise < approve` 上的相邻反向；`abstain` **跳过而不截断**序列；因此最早第 3 轮才可能检出 | 不能复用 `DECISION_SCORES`：那是共识计分用的，`abstain` 与 `reject` 同为 `0.0`，复用会把「赞成→弃权→赞成」误判成反向——弃权是**没有判断**，不是改了判断。跳过而非截断，是因为「赞成→反对→弃权→赞成」确实来回了两次。三个限制合起来决定了两件事：拦截要在第 N 轮生效则 `max_rounds ≥ N+1`，且 Q-17 的阈值只能从这个**分布**（`reversals`）标定，不能拍脑袋 | `[已定]` |
 | D-88 | 十模块布局按「模块 = 逻辑单元（文件或包皆可）」落地：建 `agents/`（`experts.py` + `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）、`interface/`（`cli.py`）；`kernel/` 与 `integration/` **暂不建** | `memory.py` 归 `agents/` 是因为 §5.4.10 把 `MemoryService` 划归元智能体的 Memory Controller，而元智能体是**唯一**被授予全局记忆读权限的 agent（§8.4.4）——归位后这层所有权在目录上就看得见。`integration/` 暂不建：当前第三方适配与 RAG 管道耦合在同一批文件里（`llama_index` 贯穿摄取与检索），强行拆分会引入一条 §3.1 未授权的 `rag → integration` 边，等出现第二个后端（Ollama）时才有真实接缝。`kernel/` 按 D-84 排在 harness 之后。单向依赖与「Cypher 唯一出处」由 `tests/test_layering.py` 守护 | `[已定]` |
 
+| D-89 | `AgentSpec` 的五项数据（`name` / `kind` / `depth` / `acts` / `tools`）与 `AgentOutcome` 字段定稿；**step 落盘用成对的 `step` + `step_done` 事件**；裁定（共识 / 停滞）由外环以**回调注入** | §12 1b 定稿。成对而非单条：JSONL 是 append-only，动作**执行前**必须先落一条（否则崩溃后会重复付费，§9.4），执行后再落一条带 `outcome` / `produced_ids`——两条合起来才是一个完整 `StepRecord`。裁定用回调注入，是因为 D-73 把裁定权划给外环：内环因此不必 import 外环，单向依赖在目录层面成立（`tests/test_layering.py`） | `[已定]` |
+| D-90 | 动作守卫的逐条判据（§12 1c）：**越界 id 剔除并记 `correct`**；剔除后不满足下限（专家 < 3、证据子集为空）才**整单作废**；**未知载荷键直接作废**；权重归一化到 Σ=1 且不四舍五入 | 元智能体是概率组件，一条坏 id 不该毁掉整轮；但「剔除后无法形成有效评审」时必须作废，由上层回落规则骨架。**未知载荷键直接作废**是让 D-75「分发通道零自由文本」成为**结构性**约束的那道闸门：提案里放不进自由文本字段。权重归一化不改变共识分（它是加权**平均**），但 Σ=1 这条契约由守卫兜住 | `[已定]` |
+| D-91 | `read_memory` 的三条枚举视图（`baseline` / `opinions` / `rounds`）+ 每轮上限 3；**常驻层不含 L4 明细** | §12 1d 定稿。视图参数与返回全为枚举与结构化字段、不含自由文本（§5.4.11），因此「读」不可能成为注入面。L4（轮次折叠）按 D-74 不常驻、只能按需取——这也是规则骨架下 `read_memory` 仍有真实调用方的原因。每轮上限是 Q-20 的占位值 | `[已定]` |
+
 ---
 
 ## 11. 待决事项
@@ -1863,9 +1871,9 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 | # | 主题 | 说明 |
 | --- | --- | --- |
 | 1 | 状态与归约器规格 | 每个状态字段的 reducer、结合律测试 |
-| 1b | **`AgentRuntime` 与 `AgentSpec` 的接口规格** | 本次讨论已定职责与边界（§3.1 / §5.4），但两者的签名、`AgentOutcome` 的字段、以及「元智能体 = 一个 spec 跑循环」的具体表达方式尚未定稿 |
-| 1c | **动作守卫的逐条判据** | §5.4.1 的表给了每个 act 的守卫要点，但「越界 id 剔除 vs 整单作废」「权重归一化」等的精确判据与错误码未定 |
-| 1d | **`read_memory` 的视图定义** | L3 / L4 各暴露哪些视图、参数枚举集、返回是否含自由文本（必须不含） |
+| 1b | ~~`AgentRuntime` 与 `AgentSpec` 的接口规格~~ | **已完成（D-89）**：`AgentSpec` = `(name, kind, depth, acts, tools)` 五项数据，`AgentOutcome` 字段定稿；「元智能体 = 一个 spec 跑循环」落地为 `run_meta()`，子智能体是同一个 runtime 的另一次执行 |
+| 1c | ~~动作守卫的逐条判据~~ | **已完成（D-90）**：越界 id 剔除并记 `correct`，剔除后不满足下限（专家 < 3 / 证据子集为空）才整单作废；未知载荷键直接作废；权重归一化到 Σ=1 且不四舍五入。错误码即 `GuardVerdict.reason`（`unknown_payload_key` / `too_few_experts` / …） |
+| 1d | ~~`read_memory` 的视图定义~~ | **已完成（D-91）**：三条枚举视图 `baseline` / `opinions` / `rounds`，参数与返回全为枚举与结构化字段（不含自由文本，§5.4.11）；L4 折叠不常驻，只能按需取；每轮次数上限 3（Q-20 的占位值） |
 | 1e | **跨 agent 文本字段的限长取值** | D-77 定了「要限」，但 `constraints` 的单条长度、条数上限、`condition` 上限的具体数值未定 |
 | 1f | ~~把机器可读的上下文元信息移出 prompt~~ | **已完成（D-86）**：`[[CTX …]]` 头已删除，expert / round / mode 经 `contracts.LLMCallMeta` **带外**传给 `LLMPort.complete`。收益兑现：`stalled` 的论证升级为字节级可证明（§5.4.4），prompt 前缀在轮次间稳定。代价如预告，改动落在 `ports.py` / `llm.py` / `experts.py` 与两个测试替身的驱动方式上；**另有一处预告之外的坑**：元信息原本在 `user` 文本里，天然是缓存键的一部分，移出带外后必须显式折进 `LLMCache.key`，否则第 2 轮会命中第 1 轮的缓存 —— 已有专门用例钉住 |
 | 2 | 并发与取消语义细节 | 并发上限、Ollama 连接池、本地模型并行承载能力 |
@@ -1894,4 +1902,4 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 *本文件为讨论中的设计基线，随讨论更新。修改时请同时更新 §10 决策记录与 §11 待决事项的状态。*
 
-*最近一次修订：十模块布局落地（§3.1 / D-88）。修订要点：建 `agents/`（`experts.py` + `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）、`interface/`（`cli.py`）；`kernel/` 与 `integration/` 暂不建并写明理由；新增 `tests/test_layering.py` 守护单向依赖与「Cypher 唯一出处」。再上一轮为振荡检测的判据与记录（§5.4.4 / D-87），更早为调用上下文外移（D-86）与元智能体架构（D-70…D-85）。*
+*最近一次修订：harness 竖切落地（§5.4 / §12 1b–1d / D-89…D-91）。修订要点：元智能体的 run 级 think-act-observe 循环、六个 act 的封闭动作空间与守卫逐条判据、`StepRecord` 成对落盘、`ActivationPlan` 首次具备生产者与消费者；**决策部分目前只是规则骨架**（Q-06 第一层），LLM 补差集那一层未接。再上一轮为十模块布局落地（§3.1 / D-88），更早为振荡检测（§5.4.4 / D-87）、调用上下文外移（D-86）与元智能体架构（D-70…D-85）。*

@@ -74,7 +74,10 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 | `session.py` | 多轮会话状态（Run 无状态 / Session 有状态） |
 | `rag/graph.py` | `Neo4jRetriever`（领域 Cypher，唯一 Cypher 出处之一）+ `InMemoryRetriever` |
 | `agents/experts.py` | 六类专家（L0）+ 规则表选专家 + prompt 构造 + 契约重试 |
-| `workflow.py` | 主流程 `run()`：意图 → 检索 → 选专家 → 两轮 Delphi → 渲染 |
+| `agents/runtime.py` | `AgentRuntime`：元/子智能体**共用**的 think-act-observe 执行入口；`StepRecord` 逐 step 落盘 |
+| `agents/guard.py` | 守卫：六个 act 的逐条判据，全局状态的**唯一写者**（扩基线 / `freeze` / `register` / 投影 / 额度） |
+| `agents/meta.py` | 元智能体的**决策部分**（当前是规则骨架）+ `ActivationPlan` 的生产者 |
+| `workflow.py` | 外环：前段准备（意图 / 检索 / 落地等级）→ 调用元智能体循环 → 后段收尾（渲染 / 保证等级 / 振荡记录） |
 | `interface/cli.py` | 对话式命令行 |
 
 ### `rag/` —— RAG 管道（LlamaIndex）
@@ -105,7 +108,11 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 
 ## 已实现的机制
 
-- **外环固定拓扑**：阶段顺序可枚举，不存在 LLM 决定的分支
+- **外环固定拓扑 + 中段受限循环**：前段/后段的阶段顺序可枚举；中段是元智能体的**封闭动作空间**（六个 act，不存在自由工具调用）
+- **元智能体是循环对象**：run 级常驻的 think-act-observe（D-70）；子智能体是它的一个 act，由同一个 `AgentRuntime` 执行（§3.1 的唯一执行入口）
+- **act 是请求，守卫是唯一写者**：扩基线 / `freeze()` / `register()` / 写 `ProjectionRecord` / 扣额度只发生在 `agents/guard.py`；元智能体只能提交提案（D-71）
+- **逐 step 可回放**：每次 think / act / guard / llm 都**在执行前**落一条 `step`、执行后落 `step_done`（§9.4 的 `StepRecord`，kernel 的前置 seam）
+- **分发通道零自由文本**：`dispatch_experts` 的载荷键是闭集，多一个键就整单作废（D-75）
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）
 - **记忆读权限在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影
@@ -119,22 +126,26 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **降级显式**：检索后端每次回退都带原因，打印并写事件日志；显式指定后端时绝不偷偷降级
 - **密钥不外泄**：key 只在 `config.py` 读成 `SecretStr`，不进 `repr` / `model_dump` / 事件日志（含真实 key 的实测扫描）
 
-## 尚未实现（v2）
+## 尚未实现 / 未接线的部分
 
-> **顺序已定**（`docs/design.md` D-84）：**先 harness，后 kernel**。kernel 的挂起/恢复与预算熔断
-> 要求 agent 执行状态可序列化，harness 须先用 `StepRecord`（§9.4）把这个 seam 留出来。
+> **顺序已定**（`docs/design.md` D-84）：**先 harness，后 kernel**。
 
-**harness（`AgentRuntime`）** —— 元智能体从「固定阶段」改为 **run 级常驻的 think-act-observe 循环**
-（D-70）；act 空间封闭枚举、**act 是请求而守卫是唯一写者**（D-71）；元/子智能体共用一份运行时，
-派发子智能体是元智能体的一个工具（D-72）。
+**harness（`AgentRuntime`）—— 已落地（D-89…D-91）**：元智能体是 run 级常驻的 think-act-observe
+循环（D-70）；act 空间是封闭枚举的六个动作，**act 是请求而守卫是全局状态的唯一写者**（D-71）；
+元/子智能体共用同一个 `AgentRuntime`（§3.1）；`ActivationPlan` 首次有了生产者与消费者；
+每次 think / act / guard / llm 在执行前落 `step`、执行后落 `step_done`（§9.4）。
 
-> 当前实现里元智能体的**决策部分完全不存在**：`select_experts()` 是纯关键词规则、`complete_intent()`
-> 从不调用 LLM（`purpose="intent"` 只被 `FakeLLM` 的分支认识）、`ActivationPlan` 是一张**零生产者
-> 零消费者**的死契约、`run_input.session` **全库无人读取**。文档层面已定稿，见 `design.md` §5.4
-> 与 D-70…D-85。
+> ⚠ **决策部分目前只有规则骨架**：激活集 / 权重 / 证据子集全部由确定性规则产出
+> （`agents/meta.py`），Q-06 三明治里「LLM 补差集」那一层**未接**。因此行为与改造前**等价**：
+> 既有 124 条用例全绿，离线端到端的证据 id 逐条相同。
+>
+> 仍然没有消费者的输入：`run_input.session`（会话快照）。它的合法读者是元智能体的 L1 层，
+> 而规则骨架用不到 L1——**接 LLM 决策时才需要**，届时一并接上。子 agent 看不到会话历史这一点
+> 已由 `tests/test_session.py` 的哨兵用例钉住。
 
-**kernel** —— 断点续跑 / 预算熔断 / 挂起恢复。
+**kernel —— 未实现**：断点续跑 / 预算熔断 / 挂起恢复。
 
-**其余** —— 分歧归因 · 工具调用（L1/L2）· 证据请求通道 · 轮次冻结的完整实现（当前每轮复用同一基线）·
-停滞与不动点检测 · 振荡检测的阈值标定 · OTel · 级联检测实验 · `Retriever.search()`
-（agent 工具侧双接口，见 `docs/rag.md` §9）
+**其余未实现或未接线** —— 工具调用（L1/L2）· 分歧归因的**阈值标定**（检测与记录已落地，Q-22）·
+证据请求的**检索端**（渠道、限额、事件都已落地，但 `Retriever.search()` 未实现，故请求显式记为
+`evidence_request_unsatisfied`，见 `docs/rag.md` §9）· **后置 HITL 的交互**（`ask_human` 只登记待办，
+真正挂起要等 kernel）· 停滞/振荡阈值的标定（Q-17）· OTel · 级联检测实验

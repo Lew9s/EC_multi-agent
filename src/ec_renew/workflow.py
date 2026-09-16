@@ -20,12 +20,15 @@ Invariants enforced in this module
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
+from functools import partial
 
-from .agents.experts import abstain_opinion, run_expert, select_experts
+from .agents.experts import select_experts
+from .agents.guard import Guard
 from .agents.memory import MemoryService
+from .agents.meta import RuleSkeleton
+from .agents.runtime import META_SPEC, AgentRuntime
 from .config import settings as default_settings
 from .contracts import (
     DECISION_SCORES,
@@ -36,22 +39,17 @@ from .contracts import (
     EvidenceBundle,
     EvidenceMeta,
     ExpertOpinion,
-    ExpertTask,
     GraphExpansion,
     Grounding,
     HumanReviewRequest,
     IntentCompletion,
     RunInput,
     RunResult,
-    StallReport,
     SubQuestion,
-    Usage,
 )
-from .errors import BudgetExceeded, InvariantViolation, StepLimitExceeded
 from .ports import RunContext as _RunContext
 
 MAX_QUERIES = 5
-UNIFORM_WEIGHT = 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -171,51 +169,8 @@ def assess_grounding(bundle: EvidenceBundle) -> Grounding:
 # --------------------------------------------------------------------------- #
 # Stage 3 — expert dispatch
 # --------------------------------------------------------------------------- #
-
-
-async def _run_one(task: ExpertTask, ctx: _RunContext, allowed: Sequence[str]) -> tuple[ExpertOpinion, Usage]:
-    """Expected failures become values; fatal errors stay exceptions.
-
-    This conversion point is what decides cancellation semantics: because a
-    timeout/transport error is turned into an abstain *value*, ``TaskGroup``
-    never sees it and the other experts are allowed to finish.
-    """
-    try:
-        async with asyncio.timeout(task.budget.timeout_s):
-            return await run_expert(task, ctx.llm, allowed, events=ctx.events)
-    except asyncio.CancelledError:
-        raise
-    except (InvariantViolation, BudgetExceeded, StepLimitExceeded):
-        raise
-    except Exception as exc:  # noqa: BLE001 — 有意的「异常转状态」点，见下方说明
-        # Expected failures become values; fatal errors stay exceptions.
-        # 这是全流程唯一的宽泛捕获点：超时/传输错误在这里变成 abstain 值，
-        # TaskGroup 因此看不到它，兄弟专家得以跑完（docs/design.md §7.6）。
-        ctx.events.emit(
-            "failure",
-            node="expert",
-            expert=task.expert,
-            cause_type=type(exc).__name__,
-            message=str(exc)[:200],
-        )
-        return abstain_opinion(task.expert, allowed, f"{type(exc).__name__}"), Usage(calls=1)
-
-
-async def dispatch(
-    tasks: Sequence[ExpertTask], ctx: _RunContext
-) -> tuple[dict[str, ExpertOpinion], Usage]:
-    allowed = ctx.registry.all_ids()
-    async with asyncio.TaskGroup() as group:
-        running = [group.create_task(_run_one(task, ctx, allowed)) for task in tasks]
-
-    opinions: dict[str, ExpertOpinion] = {}
-    usage = Usage()
-    # Sorted merge -> order independent, identical on replay.
-    for task, runner in sorted(zip(tasks, running), key=lambda pair: pair[0].expert):
-        opinion, spent = runner.result()
-        opinions[task.expert] = opinion
-        usage = usage + spent
-    return opinions, usage
+# 派发本身（含「异常转状态」的那一个宽泛捕获点）已移入
+# ``agents/runtime.AgentRuntime``：§3.1 要求它是**唯一执行入口**，不得有第二条执行路径。
 
 
 # --------------------------------------------------------------------------- #
@@ -441,7 +396,6 @@ async def run(
     top_k = top_k or cfg.top_k
 
     warnings: list[str] = []
-    total_usage = Usage()
     ctx.events.emit("run_started", request=run_input.request, max_rounds=max_rounds)
 
     # --- stage 1: intent ------------------------------------------------- #
@@ -459,11 +413,14 @@ async def run(
         note=grounding.note,
     )
 
-    # --- stage 3: select experts (rule table) ---------------------------- #
-    active = select_experts(intent.normalized_request, intent.historical_disciplines)
-
+    # --- stage 3: 候选专家骨架（规则）+ 守卫/运行时装配 ------------------- #
     ctx.events.emit("node_started", node="project")
-    human_decision = None
+    memory = MemoryService(ctx.registry)
+    # 守卫是全局状态的唯一写者；runtime 是唯一执行入口（D-71 / §3.1）。
+    guard = Guard(ctx, memory=memory)
+    skeleton = RuleSkeleton()
+    # 人类在 HITL 里改过的专家集优先于规则表（D-19：用户调整不受限但留痕）。
+    active_override: list[str] | None = None
 
     if not grounding.has_history:
         warnings.append("no_history")
@@ -471,7 +428,9 @@ async def run(
             understood_request=intent.normalized_request,
             retrieved_evidence=ctx.registry.refs(bundle.baseline_ids)[:8],
             missing=["历史变更案例", "同类组件处置经验"],
-            candidate_experts=active,
+            candidate_experts=select_experts(
+                intent.normalized_request, intent.historical_disciplines
+            ),
             questions=["是否确认按上述专家范围评估？", "是否有可补充的背景信息？"],
         )
         ctx.events.emit("degradation", level="knowledge_based", reason="no_history")
@@ -486,10 +445,9 @@ async def run(
                     grounding=grounding,
                     warnings=tuple(warnings),
                 )
-            # User-supplied facts become first-class evidence (source="human"),
-            # so the traceability rule holds without exception.
-            for fact in human_decision.provided_facts:
-                ctx.registry.register(source="human", content=fact.raw_text)
+            # 人类提供的事实登记为**一等证据**（source="human"），可回溯性不破例；
+            # 而写 registry 的只有守卫（D-28 / D-71）。
+            guard.register_human_facts(f.raw_text for f in human_decision.provided_facts)
             chosen = [
                 e
                 for e in EXPERT_IDS
@@ -498,7 +456,7 @@ async def run(
             for excluded in human_decision.excluded_by_user:
                 warnings.append(f"excluded_by_user:{excluded}")
             if chosen:
-                active = chosen
+                active_override = chosen
             ctx.events.emit(
                 "human_decision_applied",
                 approved=human_decision.approved_experts,
@@ -509,99 +467,47 @@ async def run(
         else:
             warnings.append("no_history_headless")
 
-    weights = weights or {expert: UNIFORM_WEIGHT for expert in active}
-    memory = MemoryService(ctx.registry)
-    ctx.events.emit("experts_selected", active=active, weights=weights)
+    # ═══ 中段：元智能体的 think-act-observe 循环（内环，§5.4.1） ═══════════ #
+    # 裁定权在外环：共识与停滞判定以回调注入（D-73），因此内环不必 import 外环。
+    runtime = AgentRuntime(ctx, guard=guard, memory=memory, run_id=ctx.run_id)
+    loop = await runtime.run_meta(
+        META_SPEC,
+        think=partial(
+            skeleton.think,
+            request=intent.normalized_request,
+            historical_disciplines=intent.historical_disciplines,
+            active_override=active_override,
+            weights_override=weights,
+        ),
+        closing=skeleton.closing,
+        request=intent.normalized_request,
+        sub_questions=intent.sub_questions,
+        max_rounds=max_rounds,
+        consensus_fn=partial(consensus, threshold=threshold, min_effective=min_effective),
+        stall_fn=detect_stall,
+    )
+    warnings.extend(loop.warnings)
+    stall = loop.stall
 
-    # --- stage 4: consensus rounds --------------------------------------- #
-    opinions_by_round: dict[int, dict[str, ExpertOpinion]] = {}
-    latest: dict[str, ExpertOpinion] = {}
-    previous: dict[str, ExpertOpinion] = {}
-    previous_baseline: list[str] = []
-    stall = StallReport()
-    score, effective, status = 0.0, 0, "retry"
-    round_no = 0
-
-    for round_no in range(1, max_rounds + 1):
-        # Recomputed every round, not once outside the loop: evidence registered
-        # *during* a run (human facts today, EvidenceRequest later) belongs in
-        # the next frozen baseline. Freezing one snapshot up front also made the
-        # "no new evidence" half of the stall test vacuously true.
-        baseline = ctx.registry.all_ids()
-        ctx.registry.freeze(round_no, baseline)
-        ctx.events.emit("round_started", round=round_no, experts=active)
-
-        tasks: list[ExpertTask] = []
-        for expert in active:
-            task, record = memory.project(
-                expert=expert,
-                request=intent.normalized_request,
-                round_no=round_no,
-                sub_questions=intent.sub_questions,
-                previous=latest.get(expert),
-                opinions=latest.values(),
-                consensus_score=score,
-                dissent_count=sum(1 for op in latest.values() if op.decision != "approve"),
-            )
-            tasks.append(task)
-            ctx.projections.append(record)
+    # 证据请求：管道已通，但检索端口还没有 `search()`（docs/rag.md §9 的双接口只实现了
+    # prefetch）。**不静默**：显式标注未满足并落事件（P5）。
+    if guard.evidence_requests:
+        if hasattr(ctx.retriever, "search"):
+            ctx.events.emit("evidence_request_deferred", count=len(guard.evidence_requests))
+        else:
+            warnings.append("evidence_request_unsatisfied")
             ctx.events.emit(
-                "projected",
-                round=round_no,
-                expert=expert,
-                policy=record.policy.value,
-                disclosed=len(record.disclosed_claim_ids),
+                "degradation",
+                level="evidence_request",
+                reason="检索端口未实现 search()，本轮证据请求无法满足（docs/rag.md §9）",
             )
 
-        round_opinions, spent = await dispatch(tasks, ctx)
-        total_usage = total_usage + spent
-        opinions_by_round[round_no] = round_opinions
-        latest = dict(round_opinions)
+    # --- stage 4：循环已由 AgentsRuntime 执行，见中段 --------------------- #
 
-        score, effective, status = consensus(round_opinions, weights, threshold, min_effective)
-        ctx.events.emit(
-            "round_finished",
-            round=round_no,
-            consensus_score=score,
-            effective_experts=effective,
-            status=status,
-            decisions={e: op.decision for e, op in sorted(round_opinions.items())},
-        )
-        if status != "retry":
-            break
-
-        # --- fixed point (D-81) ------------------------------------------- #
-        # Only meaningful from round 2 on: round 1 -> 2 also changes `mode`,
-        # `revision` and `cross_agent` structurally, so their prompts differ for
-        # reasons that have nothing to do with information gain.
-        if previous and detect_stall(previous, round_opinions, previous_baseline, baseline):
-            stall = StallReport(
-                stalled=True,
-                detected_at_round=round_no,
-                skipped_rounds=max_rounds - round_no,
-                unchanged_experts=sorted(round_opinions),
-            )
-            ctx.events.emit("stalled", round=round_no, experts=stall.unchanged_experts)
-            ctx.events.emit("stall_skipped", skipped_rounds=stall.skipped_rounds)
-            # Not `manual_review`: no expert is still disagreeing, the process
-            # has simply stopped producing information (§5.6.1).
-            status = "stalled"
-            warnings.append("stalled")
-            break
-
-        previous = dict(round_opinions)
-        previous_baseline = baseline
-
-    if status == "retry":
-        status = "manual_review"
-        warnings.append("max_rounds_reached")
-
-    # --- oscillation: recorded, never acted upon (D-81) ------------------- #
-    # Computed once at the end over the whole decision history. The per-round
-    # decision matrix is already in the event log (`round_finished`), so this
-    # records the interpretation rather than the raw data — and it deliberately
-    # steers nothing: no expert is skipped and no round is cut short.
-    oscillation = detect_oscillations(opinions_by_round)
+    # ═══ 后段：确定性收尾（外环） ══════════════════════════════════════════ #
+    # 振荡：只记录、不驱动控制流（D-81）。逐轮决策矩阵本来就在事件日志的
+    # `round_finished` 里，这里只是把它算成一个可标定的分布。
+    oscillation = detect_oscillations(loop.opinions_by_round)
     stall.oscillating_experts = sorted(oscillation)
     stall.reversals = dict(sorted(oscillation.items()))
     if oscillation:
@@ -617,11 +523,11 @@ async def run(
     conclusion = render_markdown(
         request=intent.normalized_request,
         grounding=grounding,
-        opinions=latest,
-        score=score,
+        opinions=loop.latest,
+        score=loop.score,
         threshold=threshold,
-        status=status,
-        rounds=round_no,
+        status=loop.status,
+        rounds=loop.rounds,
         evidence_gists=evidence_gists,
         oscillation=stall.reversals,
     )
@@ -633,10 +539,10 @@ async def run(
     )
     ctx.events.emit(
         "run_finished",
-        status=status,
-        consensus_score=score,
+        status=loop.status,
+        consensus_score=loop.score,
         assurance=assurance.level,
-        usage=total_usage.model_dump(),
+        usage=loop.usage.model_dump(),
     )
 
     return RunResult(
@@ -644,15 +550,15 @@ async def run(
         normalized_request=intent.normalized_request,
         conclusion=conclusion,
         evidence_ids=sorted(ctx.registry.all_ids()),
-        active_experts=active,
-        consensus_score=score,
-        consensus_status=status,  # type: ignore[arg-type]
+        active_experts=loop.active,
+        consensus_score=loop.score,
+        consensus_status=loop.status,  # type: ignore[arg-type]
         stall=stall,
         grounding=grounding,
         assurance=assurance,
-        usage=total_usage,
+        usage=loop.usage,
         warnings=tuple(warnings),
-        rounds=round_no,
+        rounds=loop.rounds,
     )
 
 
