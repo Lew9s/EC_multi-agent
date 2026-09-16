@@ -1014,11 +1014,13 @@ class Claim(BaseModel):                  # run 内的事实载体（含身份，
     condition: SingleLineText | None     # 单行、≤200；空串视为「无条件」
     evidence_ids: list[str] = Field(min_length=1)
     discipline: str                      # 来源专业：run 内的研究数据（§8.5.6），由代码按实际发言人覆写
+    claim_id: str                        # computed：C-<sha1(claim|condition|evidence_ids)[:12]>，不含 discipline
 
 class AnonymizedClaim(BaseModel):        # 跨 agent 边界时的形态（D-77）
     claim: ClaimText
     condition: SingleLineText | None
     evidence_ids: list[str] = Field(min_length=1)
+    claim_id: str                        # computed，与源 Claim 同 id
     # 故意没有 discipline：E01..E06 与专家身份一一对应，携带它即身份披露
     # （D-50 / §8.4.5）。**字段集合本身就是保证**——往 Claim 加字段不会自动扩宽
     # 边界；有一条测试钉住这个字段集。
@@ -1043,7 +1045,7 @@ class ReviewFeedback(BaseModel):         # Delphi 式受控反馈
     round: int
     consensus_score: float
     dissent_count: int
-    anonymous_dissent: list[str] = []    # 不含身份与完整论证
+    anonymous_dissent_ids: list[str] = []  # claim id，不含身份与完整论证
 
 class RevisionContext(BaseModel):        # mode == "revise" 时注入
     own_previous: ExpertOpinion          # 必须是该专家本人的
@@ -1054,11 +1056,13 @@ class ProjectionRecord(BaseModel):       # 审计：本轮向谁披露了什么
     round: int
     expert: str
     policy: DisclosurePolicy
-    disclosed_claim_ids: list[str]        # 交付实现须存 claim 的稳定 id，不是 claim 文本
-    hard_constraint_ids: list[str]        # 同上：存 id，不是文本
+    disclosed_claim_ids: list[str]        # claim 的稳定 id（"C-…"），不是 claim 文本
+    hard_constraints: list[str]           # 直接留文本：约束是无条件广播（D-56）而非聚合，且已限长（D-77）
 ```
 
-> **命名与语义必须对齐**：`Claim` 当前没有稳定 id，因此实现里这两个字段实际存的是**文本**（`memory.py` 的 `disclosed = [c.claim for c in visible]`），与「披露可复现、可作研究指标」（§8.5.6）的表述不符。二选一：给 `Claim` 加稳定 id，或把字段改名为 `disclosed_claims` / `hard_constraints` 并承认它存的是文本。
+> **为什么 claim 要 id 而约束不要**：§8.5.6 要回答「披露了哪条 claim 之后，哪个专家改了判断」（D-62 的披露-改变率），这需要 claim 的**身份**；用文本做连接，两个专家说同一句话就会碰撞，任何空白差异都会把同一条论据裂成两条。约束没有这层聚合语义，另造一套 id 方案是为不存在的需求加抽象。
+>
+> **id 由代码计算且不含 `discipline`**：`claim_id = C-<sha1(claim|condition|evidence_ids)[:12]>`，与 evidence_id 同属内容寻址；排除 discipline 是为了让「两个专业独立提出同一约束」得到**同一个 id**——那正是最值得观察的情形。它做成 computed field，因此模型连伪造的入口都没有（不需要像 `expert` 那样在解析时覆写）。
 
 #### 6.6.1 编排类（元智能体专用，D-70…D-85）
 
