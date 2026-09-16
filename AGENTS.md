@@ -74,6 +74,13 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 
 > ⚠ 本机默认的 pip 镜像（清华）不通，**必须显式 `-i https://pypi.org/simple`**。
 
+> ⚠ **Windows 上 ruff 看不到 POSIX 可执行位**：`EXE001`（有 shebang 但文件不可执行）
+> 只在 Linux / CI 暴露，本地会一直是绿的。给脚本加可执行位必须用
+> `git update-index --chmod=+x <path>` —— 在资源管理器里改属性不会被 git 记录。
+> 同理，`pip < 25.1` 会静默忽略 PEP 735 的 `[dependency-groups]`，
+> 所以 dev 依赖只写成 `[project.optional-dependencies]`（extra）。
+> **本地绿不等于 CI 绿**；改动构建/CI 时以 CI 结果为准。
+
 ---
 
 ## 2. 分支与提交
