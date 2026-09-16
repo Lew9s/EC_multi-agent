@@ -16,9 +16,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -45,6 +53,55 @@ DECISION_SCORES: dict[str, float] = {
 EvidenceSource = Literal["graph", "text", "human", "standard"]
 ReviewDecision = Literal["approve", "revise", "reject", "abstain"]
 Autonomy = Literal["L0", "L1", "L2"]
+
+
+# --------------------------------------------------------------------------- #
+# Cross-agent text bounds (D-77)
+# --------------------------------------------------------------------------- #
+# Why these exist: ``Claim.claim`` / ``Claim.condition`` / ``ExpertOpinion.
+# constraints`` are pasted **verbatim** into *other* agents' prompts (§8.5.3),
+# and ``constraints`` reaches everyone unconditionally (D-56). Without bounds a
+# single expert can either inject a fake section heading or blow up every
+# peer's context.
+#
+# These are module constants, not ``Settings`` fields, on purpose: AGENTS.md
+# §3.5 requires a calibration basis for anything configurable, and we have
+# none for these numbers yet. They are provisional — see docs/design.md §12
+# item 1e.
+#
+# Provisional values, not calibrated:
+MAX_CLAIM_CHARS = 200
+MAX_CONDITION_CHARS = 200
+MAX_CONSTRAINT_CHARS = 200
+MAX_CONSTRAINTS = 8
+MAX_UNCERTAINTY_CHARS = 200
+MAX_UNCERTAINTIES = 8
+MAX_RATIONALE_CHARS = 500
+
+#: A claim is a *conclusion*: it must say something and it must stay on one
+#: line, because it is copied verbatim into a peer's prompt where a newline
+#: could fabricate a markdown heading ("## 新指令 …").
+ClaimText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_CLAIM_CHARS,
+        pattern=r"^[^\r\n]*$",
+    ),
+]
+
+#: Bounded single-line text for list items and optional fields. Blank values
+#: are dropped by the owning model rather than rejected here, so a sloppy model
+#: does not lose its whole opinion over an empty string.
+SingleLineText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        max_length=MAX_CONSTRAINT_CHARS,
+        pattern=r"^[^\r\n]*$",
+    ),
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -187,12 +244,24 @@ class Claim(BaseModel):
 
     ``claim`` is copied verbatim, never re-summarised, and length-capped, so a
     sub agent cannot smuggle instructions into another sub agent's prompt.
+    ``claim`` and ``condition`` are also single-line for the same reason: a
+    newline would let them fabricate a markdown heading in the peer's prompt
+    (D-77).
     """
 
-    claim: str = Field(max_length=200)
-    condition: str | None = None
+    claim: ClaimText
+    condition: SingleLineText | None = None
     evidence_ids: list[str] = Field(min_length=1)
     discipline: str = "E01"
+
+    @field_validator("condition", mode="before")
+    @classmethod
+    def _blank_condition_means_absent(cls, value: object) -> object:
+        """``condition`` is optional (Q-19): an empty string means "no
+        condition", not "malformed output" — do not burn a contract retry."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class DisclosurePolicy(str, Enum):
@@ -277,15 +346,30 @@ class ExpertTask(BaseModel):
 class ExpertOpinion(BaseModel):
     expert: str
     decision: ReviewDecision
-    rationale: str = ""
+    rationale: str = Field(default="", max_length=MAX_RATIONALE_CHARS)
     evidence_ids: list[str] = Field(min_length=1)
     claims: list[Claim] = Field(default_factory=list)
-    constraints: list[str] = Field(default_factory=list)
-    uncertainties: list[str] = Field(default_factory=list)
+    # Bounded count *and* per-item length: `constraints` reaches every peer's
+    # prompt unconditionally (D-56), so an unbounded list is both an injection
+    # surface and a context bomb.
+    constraints: list[SingleLineText] = Field(default_factory=list, max_length=MAX_CONSTRAINTS)
+    uncertainties: list[SingleLineText] = Field(
+        default_factory=list, max_length=MAX_UNCERTAINTIES
+    )
     risk_level: Literal["low", "medium", "high"] = "low"
     confidence: float = Field(default=0.0, ge=0, le=1)  # 仅记录，不参与计分
+    #: This opinion is incomplete: either the agent hit its budget, or a field
+    #: had to be repaired (truncated) after contract retries were exhausted.
     partial: bool = False
     assurance: AssuranceLevel = Field(default_factory=AssuranceLevel)
+
+    @field_validator("constraints", "uncertainties")
+    @classmethod
+    def _drop_blank_items(cls, values: list[str]) -> list[str]:
+        """A blank item carries no information; dropping it must not cost the
+        expert its whole opinion (unlike an over-long one, which is a contract
+        violation — see ``experts.repair_opinion``)."""
+        return [v for v in values if v]
 
     @computed_field
     @property
