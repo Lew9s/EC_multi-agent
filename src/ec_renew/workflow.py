@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from .config import settings as default_settings
 from .contracts import (
@@ -315,6 +315,53 @@ def detect_stall(
 
 
 # --------------------------------------------------------------------------- #
+# Oscillation detection — recorded, never acted upon (D-81)
+# --------------------------------------------------------------------------- #
+
+#: Severity axis used *only* to decide whether a decision reversed direction.
+#:
+#: Deliberately not ``contracts.DECISION_SCORES``: that map exists for scoring
+#: consensus, where ``abstain`` is worth the same as ``reject`` (0.0) because it
+#: contributes nothing. Reusing it here would make "approve -> abstain ->
+#: approve" look like a reversal — but an abstention is the *absence* of a
+#: judgment, not a change of one.
+_DECISION_RANK: dict[str, int] = {"reject": 0, "revise": 1, "approve": 2}
+
+
+def detect_oscillations(
+    history: Mapping[int, Mapping[str, ExpertOpinion]],
+) -> dict[str, int]:
+    """Per-expert count of adjacent direction reversals (§5.4.4).
+
+    ``abstain`` is skipped rather than used to break the sequence: an expert that
+    went approve -> reject -> abstain -> approve did reverse twice, and the
+    abstention does not undo that.
+
+    A reversal needs two consecutive *steps*, so no expert can be flagged before
+    round 3. Only experts with at least one reversal are returned: the recorded
+    predicate is the plain reading of §5.4.4 ("决策序列出现相邻的反向变化"),
+    while whether that should *trigger* anything is Q-17's open question — hence
+    the counts, which are what a threshold would have to be calibrated against.
+    """
+    sequences: dict[str, list[str]] = {}
+    for round_no in sorted(history):
+        for expert, opinion in history[round_no].items():
+            sequences.setdefault(expert, []).append(opinion.decision)
+
+    reversals: dict[str, int] = {}
+    for expert, decisions in sequences.items():
+        ranks = [_DECISION_RANK[d] for d in decisions if d in _DECISION_RANK]
+        count = sum(
+            1
+            for first, second, third in zip(ranks, ranks[1:], ranks[2:])
+            if (second - first) * (third - second) < 0
+        )
+        if count:
+            reversals[expert] = count
+    return reversals
+
+
+# --------------------------------------------------------------------------- #
 # Stage 5 — rendering
 # --------------------------------------------------------------------------- #
 
@@ -329,6 +376,7 @@ def render_markdown(
     status: str,
     rounds: int,
     evidence_gists: dict[str, str],
+    oscillation: Mapping[str, int] | None = None,
 ) -> str:
     lines = [
         "# 工程变更方案",
@@ -338,10 +386,13 @@ def render_markdown(
         f"- 共识分：{score:.2f}（阈值 {threshold:.2f}）",
         f"- 状态：{status}",
         f"- 轮次：{rounds}",
-        "",
-        "## 各专业意见",
-        "",
     ]
+    if oscillation:
+        # Recorded, so it must be *visible* (P5: no silent behaviour) — and
+        # labelled as not affecting the verdict, because nothing acts on it yet.
+        flips = "；".join(f"{e}（{n} 次反向）" for e, n in sorted(oscillation.items()))
+        lines.append(f"- 迭代振荡（仅记录，未影响本次判定）：{flips}")
+    lines += ["", "## 各专业意见", ""]
     for expert in sorted(opinions):
         op = opinions[expert]
         name = DISCIPLINE_NAMES.get(expert, expert)
@@ -545,6 +596,21 @@ async def run(
         status = "manual_review"
         warnings.append("max_rounds_reached")
 
+    # --- oscillation: recorded, never acted upon (D-81) ------------------- #
+    # Computed once at the end over the whole decision history. The per-round
+    # decision matrix is already in the event log (`round_finished`), so this
+    # records the interpretation rather than the raw data — and it deliberately
+    # steers nothing: no expert is skipped and no round is cut short.
+    oscillation = detect_oscillations(opinions_by_round)
+    stall.oscillating_experts = sorted(oscillation)
+    stall.reversals = dict(sorted(oscillation.items()))
+    if oscillation:
+        ctx.events.emit(
+            "oscillation_observed",
+            experts=stall.oscillating_experts,
+            reversals=stall.reversals,
+        )
+
     evidence_gists = {
         ref.evidence_id: ref.gist for ref in ctx.registry.refs(ctx.registry.all_ids())
     }
@@ -557,6 +623,7 @@ async def run(
         status=status,
         rounds=round_no,
         evidence_gists=evidence_gists,
+        oscillation=stall.reversals,
     )
 
     assurance = AssuranceLevel(
