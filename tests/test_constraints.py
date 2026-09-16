@@ -24,6 +24,7 @@ from ec_renew.contracts import (
     ExpertTask,
     LLMResult,
     RevisionContext,
+    RunInput,
     Usage,
     make_claim_id,
 )
@@ -34,9 +35,12 @@ from ec_renew.experts import (
     repair_opinion,
     run_expert,
 )
+from ec_renew.llm import parse_ctx
 from ec_renew.memory import EvidenceRegistry, MemoryService
-from ec_renew.rag import disciplines_for_departments
-from ec_renew.workflow import consensus
+from ec_renew.observability import NullEventLog
+from ec_renew.ports import RunContext
+from ec_renew.rag import InMemoryRetriever, disciplines_for_departments
+from ec_renew.workflow import consensus, detect_stall, run
 
 EID = "E-aaaaaaaaaaaa"
 
@@ -407,6 +411,123 @@ def test_identical_peer_claims_share_one_disclosure_id() -> None:
     assert record.disclosed_claim_ids == sorted(
         {c.claim_id for c in task.cross_agent.anonymous_claims}
     )
+
+
+# --------------------------------------------------------------------------- #
+# D-81 / D-82 — a fixed point must be detected, not merely bounded
+# --------------------------------------------------------------------------- #
+
+
+def _op(expert: str, decision: str = "revise", **kw: object) -> ExpertOpinion:
+    return ExpertOpinion(expert=expert, decision=decision, evidence_ids=[EID], **kw)
+
+
+def test_no_stall_when_the_baseline_grows() -> None:
+    same = {"E01": _op("E01")}
+    assert not detect_stall(same, dict(same), [EID], [EID, "E-newevidence0"])
+
+
+def test_no_stall_when_a_single_expert_moves() -> None:
+    before = {"E01": _op("E01"), "E02": _op("E02")}
+    after = {"E01": _op("E01"), "E02": _op("E02", "approve")}
+    assert not detect_stall(before, after, [EID], [EID])
+
+
+def test_no_stall_when_the_participating_set_changes() -> None:
+    before = {"E01": _op("E01")}
+    after = {"E01": _op("E01"), "E02": _op("E02")}
+    assert not detect_stall(before, after, [EID], [EID])
+
+
+def test_stall_when_nothing_moves() -> None:
+    before = {"E01": _op("E01"), "E02": _op("E02", "reject")}
+    after = {e: op.model_copy(deep=True) for e, op in before.items()}
+    assert detect_stall(before, after, [EID], [EID])
+
+
+def test_rationale_counts_as_movement() -> None:
+    """The rationale comes back to its own author through ``own_previous``, so
+    a change in it genuinely changes that expert's next prompt."""
+    before = {"E01": _op("E01", rationale="第一轮的理由")}
+    after = {"E01": _op("E01", rationale="第二轮的理由")}
+    assert not detect_stall(before, after, [EID], [EID])
+
+
+def test_uncertainties_do_not_count_as_movement() -> None:
+    """Nothing renders uncertainties into a prompt, so a change there cannot
+    alter any later round — only the final report we already hold."""
+    before = {"E01": _op("E01", uncertainties=["不确定 A"])}
+    after = {"E01": _op("E01", uncertainties=["完全不同的不确定 B"])}
+    assert detect_stall(before, after, [EID], [EID])
+
+
+def test_peer_claim_change_counts_as_movement() -> None:
+    before = {"E01": _op("E01", claims=[{"claim": "论据一", "evidence_ids": [EID]}])}
+    after = {"E01": _op("E01", claims=[{"claim": "论据二", "evidence_ids": [EID]}])}
+    assert not detect_stall(before, after, [EID], [EID])
+
+
+class _FixedPointLLM:
+    """Same opinions on every round: the loop reaches a *fixed point* rather
+    than converging — exactly the death spiral ``max_rounds`` used to hide."""
+
+    def __init__(self, *, vary_rationale: bool = False) -> None:
+        self.vary_rationale = vary_rationale
+
+    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult:
+        round_no = int(parse_ctx(user).get("round", "1") or 1)
+        cited = sorted(set(re.findall(r"E-[0-9a-f]{12}", user))) or [EID]
+        rationale = f"第 {round_no} 轮的考虑" if self.vary_rationale else "同样的考虑"
+        return LLMResult(
+            content=json.dumps(
+                {
+                    "decision": "revise",  # 0.5 < 0.6 -> never approved
+                    "rationale": rationale,
+                    "evidence_ids": cited,
+                    "risk_level": "low",
+                },
+                ensure_ascii=False,
+            ),
+            model="fixed-point",
+            usage=Usage(calls=1),
+        )
+
+
+def _run_offline(llm: object) -> object:
+    ctx = RunContext(
+        run_id="stall-run",
+        llm=llm,
+        registry=EvidenceRegistry(),
+        events=NullEventLog(),
+        retriever=InMemoryRetriever(),
+    )
+    return asyncio.run(run(RunInput(request="301分段FR36污水井更换加厚板，需焊接"), ctx))
+
+
+def test_a_fixed_point_stops_the_loop_and_is_reported_as_stalled() -> None:
+    result = _run_offline(_FixedPointLLM())
+
+    assert result.consensus_status == "stalled"
+    assert result.rounds == 2, "a fixed point must not burn the remaining rounds"
+    assert result.stall.stalled is True
+    assert result.stall.detected_at_round == 2
+    assert result.stall.skipped_rounds == 1
+    assert result.stall.unchanged_experts == result.active_experts
+    assert "stalled" in result.warnings
+    # The point of the third status value: "no further information gain" must
+    # not be reported as "the experts still disagree" (D-82).
+    assert "max_rounds_reached" not in result.warnings
+
+
+def test_a_moving_round_is_not_mistaken_for_a_stall() -> None:
+    """Same decisions every round, but the rationale keeps changing — so the
+    next prompt really does differ and this is not a fixed point."""
+    result = _run_offline(_FixedPointLLM(vary_rationale=True))
+
+    assert result.consensus_status == "manual_review"
+    assert result.rounds == 3
+    assert result.stall.stalled is False
+    assert "max_rounds_reached" in result.warnings
 
 
 # --------------------------------------------------------------------------- #

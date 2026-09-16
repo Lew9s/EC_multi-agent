@@ -486,12 +486,23 @@ round N:
 | **单个专家振荡** | 决策序列出现相邻的反向变化（如 approve → reject → approve） | 下一轮**不再重跑该专家**，复用其上一轮意见并标 `oscillating`；**保留在激活集与分母中**（守 D-19：不重跑 ≠ 移除） |
 | **多人振荡** | ≥ 2 个专家振荡，或振荡专家权重占比超阈值 | 判为不收敛，直接转 `manual_review`，不跑下一轮 |
 
-**不动点为什么无需阈值**：无新证据 ⇒ 证据集合相同；**全部投影字段**（`decision` / `evidence_ids` / `claims` / `constraints` / `uncertainties` / `rationale`）逐字相同 ⇒ 下一轮与本轮的 prompt **除 CTX 头里的 `round=<n>` 外**逐字相同——`render_task` 会把轮次写进 `[[CTX ...]]`，而这是 prompt 的第一行。此时继续迭代只有两种可能：
+**不动点为什么无需阈值**：无新证据 ⇒ 证据集合相同；**全部投影字段**逐字相同 ⇒ 下一轮与本轮的 prompt **除 CTX 头里的 `round=<n>` 外**逐字相同——`render_task` 会把轮次写进 `[[CTX ...]]`，而这是 prompt 的第一行。此时继续迭代只有两种可能：
 
 1. 输出与上一轮相同 → **死循环**，只是被 `max_rounds` 兜住；
 2. 输出仅因那个**语义为空的轮次计数器**而变化 → 等于把「对无关计数器敏感」固化成系统行为，本身就不该接受。
 
 两种情况都不构成继续迭代的理由，因此该检测**无需阈值、立即生效**。
+
+**「投影字段」的精确定义**——判据范围越大越保守（漏掉真停滞），越小越灵敏（可能把真变化当停滞），所以必须逐字段说清：
+
+| 计入判据 | 理由 |
+| --- | --- |
+| `decision` | 决定共识分与对外披露的分歧数 |
+| `evidence_ids`、`rationale` | 经 `RevisionContext.own_previous` 回到**自己**的下一轮 prompt |
+| `claims`（按 `claim_id` 比对，不看文本） | 经 `CrossAgentInfo` 到达**同级** prompt；用 id 比对可免疫空白噪声（D-78） |
+| `constraints` | 无条件到达**每一个**同级 prompt（D-56） |
+
+**不计入**：`uncertainties` / `risk_level` / `confidence` / `assurance` / `partial`。没有任何渲染路径把它们写进 prompt，因此它们变化不可能改变后续轮次——只改变最终报告，而报告用的是手上这批意见。
 
 > **一处诚实的限定**：当前实现下这不是「可证明的字节级死循环」，因为轮次计数器在 prompt 里。若要让论证变成严格可证明（并顺带让 prompt 前缀在轮次间保持稳定、提高 KV cache 命中），需要把「机器可读的上下文元信息」从 prompt 里移到端口的带外参数——见 §12 第 1f 项。在完成该改动之前，`stalled` 的判据是「无信息增益」，而不是「已证明的输出相同」。
 >
@@ -1000,7 +1011,7 @@ class RunResult(BaseModel):
     evidence_ids: list[str]
     assurance: AssuranceLevel
     consensus_status: Literal["approved", "manual_review", "stalled"] = "manual_review"
-    oscillation: OscillationReport = OscillationReport()
+    stall: StallReport = StallReport()
     turn_delta: TurnSummary              # 交还给会话层的唯一产物
 ```
 
@@ -1111,10 +1122,13 @@ class RevisionProposal(BaseModel):       # 意图 / query 集修订提案（§5.
     changes: list[str]
     evidence_ids: list[str]                # 依据，必须可回溯
 
-class OscillationReport(BaseModel):      # 停滞与振荡的确定性判定（§5.4.4）
-    stalled: bool = False                  # 不动点：无新证据 + 零改变率
-    oscillating_experts: list[str] = []
-    reused_from_round: dict[str, int] = {} # 专家 → 其复用意见的来源轮次
+class StallReport(BaseModel):            # 不动点的确定性判定（§5.4.4）
+    stalled: bool = False
+    detected_at_round: int = 0             # 判定发生在第几轮之后
+    skipped_rounds: int = 0                # 因停滞而跳过的剩余轮次
+    unchanged_experts: list[str] = []      # 判据：这些专家的投影字段全部零变化
+    # 振荡的字段（oscillating_experts / reused_from_round）由它自己的变更加入：
+    # 阈值尚未标定，可以先记录，但不得驱动控制流（D-81）
 ```
 
 `ExpertTask` 修订（新增 `mode` / `revision` / `cross_agent` 与归属断言）：
@@ -1616,7 +1630,7 @@ Agent C 看到了 A+B → high risk
 - **停滞（不动点）**：本轮无新证据 **且** 全部投影字段与上一轮逐字相同。此时下一轮的 prompt 除轮次计数器外与本轮相同，继续迭代不产生信息增益（详细判据与限定见 §5.4.4），无需阈值即应立即停止。
 - **振荡**：决策序列出现相邻的反向变化（approve → reject → approve）。
 
-判定是**确定性计算**（元智能体只出 `AttributionProposal` / `OscillationReport` 提案）；动作由外环裁定。完整规则见 §5.4.4。
+判定是**确定性计算**（元智能体只出 `AttributionProposal` / `StallReport` 提案）；动作由外环裁定。完整规则见 §5.4.4。
 
 #### 8.6.4 `confidence` 不参与共识计分
 
