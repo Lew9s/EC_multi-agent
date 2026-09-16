@@ -19,9 +19,9 @@
 
 用法::
 
-    python -m ec_renew.rag_llama.calibrate
-    python -m ec_renew.rag_llama.calibrate --json
-    python -m ec_renew.rag_llama.calibrate --queries my_labels.json
+    python -m ec_renew.rag.calibrate
+    python -m ec_renew.rag.calibrate --json
+    python -m ec_renew.rag.calibrate --queries my_labels.json
 
 ``my_labels.json`` 形如 ``{"in_domain": [...], "out_domain": [...]}``。
 换语料、换向量模型、换维度之后都应重跑一次。
@@ -210,7 +210,7 @@ def calibrate(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m ec_renew.rag_llama.calibrate",
+        prog="python -m ec_renew.rag.calibrate",
         description="用带标签的 query 集合标定 VECTOR_MIN_SCORE",
     )
     parser.add_argument("--queries", help="JSON 文件：{\"in_domain\": [...], \"out_domain\": [...]}")

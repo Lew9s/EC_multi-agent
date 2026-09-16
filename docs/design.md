@@ -125,6 +125,14 @@ interface → workflow → agents / rag → ports → contracts
 - **实现顺序：harness（`AgentRuntime`）先于 kernel**。kernel 的挂起/恢复与预算熔断要求 agent 执行状态可序列化，故 harness 从第一天起就要按 `StepRecord`（§9.4）逐步落盘，否则 kernel 上马时必须重写 harness。
 - LLM 输出不得直接进入 `eval` / `exec`。
 
+**落地情况（十模块重构后）**：`interface/`（CLI）、`workflow.py`、`agents/`
+（`experts.py` / `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）已按上表归位；
+`contracts` / `ports` / `config` / `errors` / `observability` / `llm` / `session` 仍在顶层
+（横切，或尚未成包）。`kernel/` 与 `integration/` **暂未建立**：前者按 D-84 排在 harness 之后；
+后者目前没有干净的接缝——第三方适配与 RAG 管道耦合在同一批文件里（`llama_index` 贯穿摄取与
+检索），强行拆分会引入一条本节未授权的 `rag → integration` 边，等出现第二个后端（Ollama）时
+再拆。单向依赖与「Cypher 唯一出处」由 `tests/test_layering.py` 守护（见 D-88）。
+
 ---
 
 ## 4. 主流程拓扑
@@ -1815,6 +1823,7 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 | D-85 | `StepRecord` 位置寻址回放与 `LLMCache` 内容寻址缓存**严格分离**，replay 优先 | 混用会在清缓存后重复付费，或把「同一位置的旧结果」当作「同一输入的结果」 | `[已定]` |
 | D-86 | 机器可读的调用上下文（expert / round / mode）用 `LLMCallMeta` **带外**传给 LLM 端口，**永不进消息内容**，且**必须参与缓存键** | 上下文一旦进了 prompt 就不再是「元信息」而是模型输入：它把 `stalled` 的论证从「可证明的输出相同」降回「无信息增益」（D-81），并让 prompt 前缀随轮次漂移、KV cache 失效。反向的坑同样致命：移出带外却不折进缓存键，第 2 轮会命中第 1 轮的缓存答案——同一份 prompt 文本、两个不同的问题（`LLMCache.key` 有专门用例钉住） | `[已定]` |
 | D-87 | 振荡判据 = 决策序列在**序轴** `reject < revise < approve` 上的相邻反向；`abstain` **跳过而不截断**序列；因此最早第 3 轮才可能检出 | 不能复用 `DECISION_SCORES`：那是共识计分用的，`abstain` 与 `reject` 同为 `0.0`，复用会把「赞成→弃权→赞成」误判成反向——弃权是**没有判断**，不是改了判断。跳过而非截断，是因为「赞成→反对→弃权→赞成」确实来回了两次。三个限制合起来决定了两件事：拦截要在第 N 轮生效则 `max_rounds ≥ N+1`，且 Q-17 的阈值只能从这个**分布**（`reversals`）标定，不能拍脑袋 | `[已定]` |
+| D-88 | 十模块布局按「模块 = 逻辑单元（文件或包皆可）」落地：建 `agents/`（`experts.py` + `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）、`interface/`（`cli.py`）；`kernel/` 与 `integration/` **暂不建** | `memory.py` 归 `agents/` 是因为 §5.4.10 把 `MemoryService` 划归元智能体的 Memory Controller，而元智能体是**唯一**被授予全局记忆读权限的 agent（§8.4.4）——归位后这层所有权在目录上就看得见。`integration/` 暂不建：当前第三方适配与 RAG 管道耦合在同一批文件里（`llama_index` 贯穿摄取与检索），强行拆分会引入一条 §3.1 未授权的 `rag → integration` 边，等出现第二个后端（Ollama）时才有真实接缝。`kernel/` 按 D-84 排在 harness 之后。单向依赖与「Cypher 唯一出处」由 `tests/test_layering.py` 守护 | `[已定]` |
 
 ---
 
@@ -1822,7 +1831,7 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 | # | 事项 | 备选 | 建议 |
 | --- | --- | --- | --- |
-| Q-01 | `disciplines` 推导时机 | (a) 检索时实时推导 / (b) 建图时预先打标 | **已定 (b)**：`corpus.py` 解析时即按「部门→专业」静态表打标，写入 Qdrant payload 并建索引，检索期零成本。表已补全语料里出现过的 10 个部门（`rag.py::DEPT_TO_DISCIPLINE`） |
+| Q-01 | `disciplines` 推导时机 | (a) 检索时实时推导 / (b) 建图时预先打标 | **已定 (b)**：`corpus.py` 解析时即按「部门→专业」静态表打标，写入 Qdrant payload 并建索引，检索期零成本。表已补全语料里出现过的 10 个部门（`rag/graph.py::DEPT_TO_DISCIPLINE`） |
 | Q-02 | 各专家默认自主度 | L0 / L1 / L2 | **默认 L1**，高不确定专家升 L2 |
 | Q-03 | 工具白名单首批内容 | `read_memory` / `dispatch_experts` / `request_evidence` / `search_evidence` / `query_subgraph` / `find_similar_cases` / `lookup_standard` | 元智能体侧先实现 `read_memory` / `dispatch_experts` / `request_evidence`（§5.4.1）；子智能体侧先实现检索类，规范类后置。**边界靠可见性而非 prompt 说明**（D-78） |
 | Q-04 | 检索配额 | 单专家 N 次 / 全局 M 次 | 单人 2 / 全局 12 |
@@ -1885,4 +1894,4 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 *本文件为讨论中的设计基线，随讨论更新。修改时请同时更新 §10 决策记录与 §11 待决事项的状态。*
 
-*最近一次修订：振荡检测的判据与记录（§5.4.4 / D-87）。修订要点：判据定为序轴 `reject < revise < approve` 上的**相邻反向**，`abstain` 跳过而不截断（因此最早第 3 轮才可能检出）；`StallReport` 增 `oscillating_experts` 与 `reversals`，只记录、不驱动控制流（D-81），`reused_from_round` 在拦截落地前刻意不设。再上一轮为把调用上下文移出 prompt（§12 1f / D-86），更早一轮为元智能体架构（D-70…D-85）。*
+*最近一次修订：十模块布局落地（§3.1 / D-88）。修订要点：建 `agents/`（`experts.py` + `memory.py`）、`rag/`（领域图 `graph.py` + 摄取与检索管道）、`interface/`（`cli.py`）；`kernel/` 与 `integration/` 暂不建并写明理由；新增 `tests/test_layering.py` 守护单向依赖与「Cypher 唯一出处」。再上一轮为振荡检测的判据与记录（§5.4.4 / D-87），更早为调用上下文外移（D-86）与元智能体架构（D-70…D-85）。*

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..rag import disciplines_for_departments
+from .graph import disciplines_for_departments
 
 # 变更单正文字段名 -> 结构化键。中英文冒号都见得到（旧数据里混用）。
 _FIELD_RE = re.compile(

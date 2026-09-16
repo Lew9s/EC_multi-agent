@@ -17,7 +17,7 @@ from collections.abc import Sequence
 
 from pydantic import ValidationError
 
-from .contracts import (
+from ..contracts import (
     EXPERT_IDS,
     MAX_CLAIM_CHARS,
     MAX_CONDITION_CHARS,
@@ -32,8 +32,8 @@ from .contracts import (
     LLMCallMeta,
     Usage,
 )
-from .errors import ContractViolation
-from .ports import EventSinkPort, LLMPort
+from ..errors import ContractViolation
+from ..ports import EventSinkPort, LLMPort
 
 # --------------------------------------------------------------------------- #
 # Roles

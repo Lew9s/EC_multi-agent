@@ -8,6 +8,9 @@
 
 ## 1. 一张图
 
+> 本文件里的裸文件名（`corpus.py` / `retriever.py` / `graph_store.py` …）都位于
+> `src/ec_renew/rag/`；领域图与 Cypher 在 `rag/graph.py`（原 `rag.py`）。
+
 ```
 data/zahuo.txt（变更单语料，!@#$%^&* 分隔；**不随仓库分发**，见 data/README.md）
         │
@@ -75,7 +78,7 @@ data/zahuo.txt（变更单语料，!@#$%^&* 分隔；**不随仓库分发**，�
 
 ## 4. Neo4j：领域 schema
 
-保留 `design.md` §0.3 的原始 schema，`rag.py` 里既有的 Cypher 一行没改：
+保留 `design.md` §0.3 的原始 schema，`rag/graph.py` 里既有的 Cypher 一行没改：
 
 ```
 (:CHANGE_ORDER {name, group_key})   name 即单号，如 H-02-1
@@ -159,7 +162,7 @@ node id 是 `文件名:单号` 的 **UUIDv5**（`corpus.py::document_id`）：
 
 ### `link()` / `expand()`
 
-直接复用 `rag.py` 的 Cypher（Cypher 只允许出现在 `rag.py` 与 `graph_store.py`）。
+直接复用 `rag/graph.py` 的 Cypher（Cypher 只允许出现在 `rag/graph.py` 与 `rag/graph_store.py`）。
 `link()` 在 CONTAINS 命中后多过一道 `is_partial_identifier()`：请求里写着
 `FR36` 时，图里的 `FR3` 也会被 CONTAINS 命中，否则意图补全会凭空多出一个
 不存在的实体，`expand()` 再据此推出错误的专业集。
@@ -255,19 +258,19 @@ cp .env.example .env      # 然后填 DEEPSEEK_API_KEY / ZHIPU_API_KEY
 #    默认读 data/zahuo.txt，可用 DATA_DIR / CORPUS_FILE 覆盖
 
 # 4) 摄取（首次会建集合、建约束、写图与向量）
-python -m ec_renew.ingest
+python -m ec_renew.rag.ingest
 
 # 常用变体
-python -m ec_renew.ingest --offline              # 无 key 自检（写入的是假向量！）
-python -m ec_renew.ingest --recreate             # 删掉并重建 Qdrant 集合
-python -m ec_renew.ingest --reset                # 先清空本项目领域图再写
-python -m ec_renew.ingest --graph-only           # 只重建图，不花 embedding 的钱
-python -m ec_renew.ingest --json                 # 机器可读结果
+python -m ec_renew.rag.ingest --offline              # 无 key 自检（写入的是假向量！）
+python -m ec_renew.rag.ingest --recreate             # 删掉并重建 Qdrant 集合
+python -m ec_renew.rag.ingest --reset                # 先清空本项目领域图再写
+python -m ec_renew.rag.ingest --graph-only           # 只重建图，不花 embedding 的钱
+python -m ec_renew.rag.ingest --json                 # 机器可读结果
 
 # 5) 跑
-python -m ec_renew.cli -r "301分段FR36污水井更换加厚板"
-python -m ec_renew.cli --rag graph -r "..."      # 只用图，不走向量
-python -m ec_renew.cli --offline -r "..."        # 全离线（FakeLLM + 内存检索）
+python -m ec_renew.interface.cli -r "301分段FR36污水井更换加厚板"
+python -m ec_renew.interface.cli --rag graph -r "..."      # 只用图，不走向量
+python -m ec_renew.interface.cli --offline -r "..."        # 全离线（FakeLLM + 内存检索）
 ```
 
 > ⚠ **语料不随仓库分发**。它属于业务数据，`.gitignore` 里写的是
@@ -306,9 +309,9 @@ python -m ec_renew.cli --offline -r "..."        # 全离线（FakeLLM + 内存�
 换语料、换向量模型或换 `EMBEDDING_DIMENSIONS` 之后，`VECTOR_MIN_SCORE` 必须重标：
 
 ```bash
-python -m ec_renew.rag_llama.calibrate            # 用内置的 36 条标注 query
-python -m ec_renew.rag_llama.calibrate --json     # 机器可读
-python -m ec_renew.rag_llama.calibrate --queries my_labels.json
+python -m ec_renew.rag.calibrate            # 用内置的 36 条标注 query
+python -m ec_renew.rag.calibrate --json     # 机器可读
+python -m ec_renew.rag.calibrate --queries my_labels.json
 ```
 
 `my_labels.json` 形如 `{"in_domain": [...], "out_domain": [...]}`。

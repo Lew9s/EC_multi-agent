@@ -16,6 +16,8 @@ import asyncio
 import json
 import re
 
+from ec_renew.agents.experts import select_experts
+from ec_renew.agents.memory import EvidenceRegistry
 from ec_renew.contracts import (
     EXPERT_IDS,
     ExpertOpinion,
@@ -24,8 +26,6 @@ from ec_renew.contracts import (
     RunInput,
     Usage,
 )
-from ec_renew.experts import select_experts
-from ec_renew.memory import EvidenceRegistry
 from ec_renew.ports import RunContext
 from ec_renew.workflow import detect_oscillations, run
 

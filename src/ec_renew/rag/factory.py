@@ -23,7 +23,7 @@ from ..config import Settings
 from ..config import settings as default_settings
 from ..errors import InvalidRequest, InvariantViolation
 from ..ports import EventSinkPort, RetrieverPort
-from ..rag import InMemoryRetriever, Neo4jRetriever
+from .graph import InMemoryRetriever, Neo4jRetriever
 
 VALID_MODES: tuple[str, ...] = ("auto", "llamaindex", "graph", "memory")
 

@@ -1,7 +1,7 @@
 # 三条质量闸门。任何一条红，PR 不得合并（AGENTS.md §1.3 / §4.1）。
 #
 # 集成测试需要真实的 Qdrant + Neo4j，因此这里用 service containers 起一套。
-# 没有它们时 tests/test_rag_llama.py 里的集成用例会自动 skip —— 那会让
+# 没有它们时 tests/test_rag.py 里的集成用例会自动 skip —— 那会让
 # 「测试通过」失去意义，所以宁可多花一分钟把服务起起来。
 name: CI
 
@@ -89,7 +89,7 @@ jobs:
         # 用例：它永远有数据可用，被 skip 就只可能是 Qdrant / Neo4j 没就绪。
         # 服务起不来时集成用例会静默 skip，那样 CI 就是假绿。
         run: |
-          python -m pytest tests/test_rag_llama.py -q -rs \
+          python -m pytest tests/test_rag.py -q -rs \
             -k "end_to_end_on_synthetic_corpus" | tee /tmp/integration.txt
           if grep -q "skipped" /tmp/integration.txt; then
             echo "::error::集成测试被跳过 —— Qdrant / Neo4j 服务可能没有就绪"

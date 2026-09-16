@@ -15,9 +15,9 @@ import asyncio
 import itertools
 from pathlib import Path
 
+from ec_renew.agents.memory import EvidenceRegistry
 from ec_renew.contracts import DisclosurePolicy, EvidenceBundle, RunInput
 from ec_renew.llm import FakeLLM
-from ec_renew.memory import EvidenceRegistry
 from ec_renew.observability import JsonlEventLog
 from ec_renew.ports import RunContext
 from ec_renew.rag import InMemoryRetriever

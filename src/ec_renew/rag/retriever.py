@@ -41,9 +41,9 @@ from ..contracts import (
     GraphExpansion,
 )
 from ..errors import PermanentExternalError
-from ..rag import Neo4jRetriever, case_row_to_meta
 from .corpus import ChangeOrder, corpus_path, load_change_orders
 from .embeddings import build_embed_model
+from .graph import Neo4jRetriever, case_row_to_meta
 from .vector_store import build_client, build_vector_store
 
 
@@ -138,7 +138,7 @@ class LlamaIndexRetriever:
         info["min_score"] = self._cfg.vector_min_score
         return info
 
-    # -- port: link / expand (delegated; all Cypher stays in rag.py) -------- #
+    # -- port: link / expand (delegated; all Cypher stays in rag/graph.py) -- #
     async def link(self, request: str) -> list[EntityRef]:
         return await self._graph.link(request)
 

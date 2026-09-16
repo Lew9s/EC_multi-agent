@@ -13,6 +13,7 @@ import asyncio
 import json
 import re
 
+from ec_renew.agents.memory import EvidenceRegistry
 from ec_renew.contracts import (
     AssuranceLevel,
     LLMCallMeta,
@@ -22,7 +23,6 @@ from ec_renew.contracts import (
     TurnSummary,
     Usage,
 )
-from ec_renew.memory import EvidenceRegistry
 from ec_renew.observability import NullEventLog
 from ec_renew.ports import RunContext
 from ec_renew.rag import InMemoryRetriever

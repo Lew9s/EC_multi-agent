@@ -13,6 +13,14 @@ import re
 import pytest
 from pydantic import ValidationError
 
+from ec_renew.agents.experts import (
+    abstain_opinion,
+    parse_opinion,
+    render_task,
+    repair_opinion,
+    run_expert,
+)
+from ec_renew.agents.memory import EvidenceRegistry, MemoryService
 from ec_renew.contracts import (
     MAX_CONSTRAINT_CHARS,
     MAX_RATIONALE_CHARS,
@@ -29,14 +37,6 @@ from ec_renew.contracts import (
     Usage,
     make_claim_id,
 )
-from ec_renew.experts import (
-    abstain_opinion,
-    parse_opinion,
-    render_task,
-    repair_opinion,
-    run_expert,
-)
-from ec_renew.memory import EvidenceRegistry, MemoryService
 from ec_renew.observability import NullEventLog
 from ec_renew.ports import RunContext
 from ec_renew.rag import InMemoryRetriever, disciplines_for_departments

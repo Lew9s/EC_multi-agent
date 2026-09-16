@@ -27,7 +27,7 @@ from pydantic import SecretStr
 from ec_renew.config import settings as base_settings
 from ec_renew.errors import PermanentExternalError, RateLimited, TransientError
 from ec_renew.rag import disciplines_for_departments, is_partial_identifier
-from ec_renew.rag_llama.corpus import (
+from ec_renew.rag.corpus import (
     ChangeOrder,
     document_id,
     load_change_orders,
@@ -35,21 +35,21 @@ from ec_renew.rag_llama.corpus import (
     summarize,
     to_documents,
 )
-from ec_renew.rag_llama.embeddings import (
+from ec_renew.rag.embeddings import (
     FakeEmbedding,
     ZhipuEmbedding,
     build_embed_model,
 )
-from ec_renew.rag_llama.extractors import (
+from ec_renew.rag.extractors import (
     DomainTripletExtractor,
     structural_refs,
 )
-from ec_renew.rag_llama.graph_store import (
+from ec_renew.rag.graph_store import (
     Triple,
     triples_from_nodes,
     validate_triple,
 )
-from ec_renew.rag_llama.retriever import rank_graph_rows, rrf_fuse
+from ec_renew.rag.retriever import rank_graph_rows, rrf_fuse
 
 CORPUS = "data/zahuo.txt"
 SEPARATOR = r"!@#\$%\^&\*"
@@ -320,7 +320,7 @@ def test_kg_extractor_selection() -> None:
     这里验证**接线**是通的（Literal 类型、合法关系表、CustomLLM 桥接都能构造）。
     抽取质量本身需要真实 key，属未验证项，见 docs/rag.md §9。
     """
-    from ec_renew.rag_llama.extractors import build_kg_extractor
+    from ec_renew.rag.extractors import build_kg_extractor
 
     assert isinstance(build_kg_extractor(mode="rule"), DomainTripletExtractor)
     with pytest.raises(ValueError):
@@ -393,7 +393,7 @@ def _sample_settings():
 
 
 def _drop_collection(cfg) -> None:
-    from ec_renew.rag_llama.vector_store import build_client
+    from ec_renew.rag.vector_store import build_client
 
     client = build_client(cfg)
     if client.collection_exists(cfg.qdrant_collection):
@@ -406,7 +406,7 @@ def _purge_synthetic_graph(cfg) -> None:
     合成单号统一用 ``S-`` 前缀正是为了这一步：Neo4j 社区版只有一个 database，
     集成测试与真实数据同库，只有靠可识别的前缀才能干净收回。
     """
-    from ec_renew.rag_llama.graph_store import Neo4jDomainWriter
+    from ec_renew.rag.graph_store import Neo4jDomainWriter
 
     writer = Neo4jDomainWriter(cfg)
     try:
@@ -418,10 +418,10 @@ def _purge_synthetic_graph(cfg) -> None:
 def _stack_available() -> bool:
     cfg = _scratch_settings()
     try:
-        from ec_renew.rag_llama.vector_store import build_client, ping
+        from ec_renew.rag.vector_store import build_client, ping
 
         ping(build_client(cfg))
-        from ec_renew.rag_llama.graph_store import Neo4jDomainWriter
+        from ec_renew.rag.graph_store import Neo4jDomainWriter
 
         writer = Neo4jDomainWriter(cfg)
         try:
@@ -445,8 +445,8 @@ def ingested_collection():
         pytest.skip(f"缺少真实语料 {REAL_CORPUS}（见 data/README.md）")
 
     cfg = _scratch_settings()
-    from ec_renew.rag_llama.ingest import ingest_sync
-    from ec_renew.rag_llama.vector_store import build_client
+    from ec_renew.rag.ingest import ingest_sync
+    from ec_renew.rag.vector_store import build_client
 
     # 断言写在 WriteReport（本次写了什么）而不是 counts（库里总共有什么）：
     # 后者依赖其它数据是否存在，会让用例互相依赖、顺序敏感。
@@ -469,7 +469,7 @@ def ingested_collection():
 def sample_collection():
     """合成语料的完整摄取 —— CI 无业务数据时的主要端到端覆盖。"""
     cfg = _sample_settings()
-    from ec_renew.rag_llama.ingest import ingest_sync
+    from ec_renew.rag.ingest import ingest_sync
 
     report = ingest_sync(cfg, offline=True, recreate=True)
     assert report.vector["points"] == 8
@@ -493,7 +493,7 @@ def sample_collection():
 @requires_stack
 def test_pipeline_end_to_end_on_synthetic_corpus(sample_collection) -> None:
     """不依赖业务数据，也要能证明「摄取 → 建图 → 检索」是通的。"""
-    from ec_renew.rag_llama.retriever import LlamaIndexRetriever
+    from ec_renew.rag.retriever import LlamaIndexRetriever
 
     retriever = LlamaIndexRetriever(sample_collection, offline=True)
     try:
@@ -524,7 +524,7 @@ def test_pipeline_end_to_end_on_synthetic_corpus(sample_collection) -> None:
 
 @requires_stack
 def test_hybrid_retriever_end_to_end(ingested_collection) -> None:
-    from ec_renew.rag_llama.retriever import LlamaIndexRetriever
+    from ec_renew.rag.retriever import LlamaIndexRetriever
 
     retriever = LlamaIndexRetriever(ingested_collection, offline=True)
     try:
@@ -565,7 +565,7 @@ def test_hybrid_retriever_end_to_end(ingested_collection) -> None:
 
 @requires_stack
 def test_prefetch_is_deterministic(ingested_collection) -> None:
-    from ec_renew.rag_llama.retriever import LlamaIndexRetriever
+    from ec_renew.rag.retriever import LlamaIndexRetriever
 
     def once():
         retriever = LlamaIndexRetriever(ingested_collection, offline=True)
@@ -581,8 +581,8 @@ def test_prefetch_is_deterministic(ingested_collection) -> None:
 
 @requires_stack
 def test_factory_auto_selects_llamaindex_when_healthy(ingested_collection) -> None:
-    from ec_renew.rag_llama.factory import build_retriever
-    from ec_renew.rag_llama.retriever import LlamaIndexRetriever
+    from ec_renew.rag.factory import build_retriever
+    from ec_renew.rag.retriever import LlamaIndexRetriever
 
     retriever, notes = build_retriever(ingested_collection, mode="auto", offline=True)
     try:
@@ -595,7 +595,7 @@ def test_factory_auto_selects_llamaindex_when_healthy(ingested_collection) -> No
 def test_factory_explicit_backend_never_silently_degrades() -> None:
     """显式要求某后端时不许偷偷换掉 —— 否则「查不到」会被伪装成「没有」。"""
     from ec_renew.errors import InvalidRequest
-    from ec_renew.rag_llama.factory import build_retriever
+    from ec_renew.rag.factory import build_retriever
 
     cfg = base_settings.model_copy(update={"zhipu_api_key": SecretStr("")})
     with pytest.raises(InvalidRequest):
@@ -606,7 +606,7 @@ def test_factory_explicit_backend_never_silently_degrades() -> None:
 
 def test_factory_memory_needs_no_services() -> None:
     from ec_renew.rag import InMemoryRetriever
-    from ec_renew.rag_llama.factory import build_retriever
+    from ec_renew.rag.factory import build_retriever
 
     retriever, notes = build_retriever(base_settings, mode="memory")
     assert isinstance(retriever, InMemoryRetriever)

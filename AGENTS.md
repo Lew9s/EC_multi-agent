@@ -47,7 +47,7 @@
 | 不变量 | 含义 |
 | --- | --- |
 | 单向依赖 | `interface → workflow → agents/rag → ports → contracts`；`contracts` 不 import 任何业务模块 |
-| Cypher 唯一出处 | 只允许出现在 `rag.py` 与 `rag_llama/graph_store.py` |
+| Cypher 唯一出处 | 只允许出现在 `rag/graph.py` 与 `rag/graph_store.py` |
 | 异常只翻译一次 | 上层不得出现 `httpx.*` / `neo4j.*` / `qdrant_client.*` 异常类型 |
 | `InvariantViolation` 永不捕获 | 它代表引擎写错，重试无意义 |
 | 降级必须显式 | 禁止静默回退；降级要带原因、打印、写事件日志 |
@@ -116,7 +116,7 @@ main                    受保护，只接受通过 PR 的合并，禁止直接 
 | `build` | 依赖、打包、CI、docker |
 | `chore` | 杂项（格式化、忽略规则） |
 
-`scope` 用模块名，例：`rag`、`rag_llama`、`workflow`、`experts`、`config`、`ci`、`deps`。
+`scope` 用模块名，例：`rag`、`agents`、`workflow`、`interface`、`config`、`ci`、`deps`。
 
 * **摘要不超过 72 字符**，不以句号结尾。
 * 正文写**理由**（为什么），不重复 diff（是什么）。
@@ -184,9 +184,9 @@ PR 描述必须回答四件事：
 | --- | --- |
 | 新增/修改环境变量 | `config.py` 的字段与 `from_env`、`.env.example`、（必要时）`.env` |
 | 新增依赖 | `pyproject.toml`，并在 PR 里说明**实测过的版本组合** |
-| 新增检索后端 / 改变降级行为 | `rag_llama/factory.py`、`docs/rag.md` §7、README |
-| 改 Neo4j schema 或 Cypher | `rag.py`、`rag_llama/graph_store.py`、`docs/rag.md` §4、`design.md` §0.3 |
-| 改 Qdrant 集合 / 维度 / payload | `rag_llama/vector_store.py`、`docs/rag.md` §5，并提醒**换维度必须 `--recreate`** |
+| 新增检索后端 / 改变降级行为 | `rag/factory.py`、`docs/rag.md` §7、README |
+| 改 Neo4j schema 或 Cypher | `rag/graph.py`、`rag/graph_store.py`、`docs/rag.md` §4、`design.md` §0.3 |
+| 改 Qdrant 集合 / 维度 / payload | `rag/vector_store.py`、`docs/rag.md` §5，并提醒**换维度必须 `--recreate`** |
 | 改共识/投影/证据语义 | `contracts.py`、`memory.py`、**`docs/design.md` 决策记录**、`tests/test_constraints.py` |
 | 改阈值/策略默认值 | `config.py`、`.env.example`，并给出**标定依据**（如 `calibrate` 输出） |
 | 新增端口或适配器 | `ports.py`、`docs/design.md` §3、README 的依赖方向图 |
@@ -254,7 +254,7 @@ Settings → Branches → Add branch protection rule
 * 提交 `.env` 或任何真实密钥；用 `--no-verify` 绕过检查。
 * 直接 push `main`；force push 已推送的公共分支。
 * 提交 `logs/`、`.cache/`、`.pytest_run/`、`__pycache__/` 等运行产物。
-* 在 `contracts.py` 里 import 业务模块；在 `rag.py` / `graph_store.py` 之外写 Cypher。
+* 在 `contracts.py` 里 import 业务模块；在 `rag/graph.py` / `rag/graph_store.py` 之外写 Cypher。
 * 用裸 `except:` / `except Exception: pass` / `except: return 0` 吞掉错误。
 * 捕获 `InvariantViolation` 或 `asyncio.CancelledError`。
 * 让上层代码看到第三方库异常类型（`httpx.*` / `neo4j.*` / `qdrant_client.*`）。
