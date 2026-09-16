@@ -106,7 +106,8 @@ cli → rag_llama.factory → rag_llama.retriever → rag（复用 Cypher 与部
 - **外环固定拓扑**：阶段顺序可枚举，不存在 LLM 决定的分支
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）
-- **记忆所有权在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影
+- **记忆读权限在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影
+  （措辞见 `docs/design.md` D-70：是**读权限**，不是「所有权」——没有任何 agent 持有存储）
 - **证据可追溯**：每个意见都带 `evidence_ids`，且必须 ⊆ 本轮 registry
 - **无历史降级**：无历史案例 → 前置 HITL → 输出标记 `knowledge_based`
 - **共识分母修正**：分母为**配置权重和**，abstain 计 0，避免"缺席抬分"
@@ -118,6 +119,20 @@ cli → rag_llama.factory → rag_llama.retriever → rag（复用 Cypher 与部
 
 ## 尚未实现（v2）
 
-自研 kernel（断点续跑/预算熔断/挂起恢复）· 分歧归因 · 工具调用（L1/L2）· 证据请求通道 ·
-轮次冻结的完整实现（当前每轮复用同一基线）· OTel · 级联检测实验 · `Retriever.search()`
+> **顺序已定**（`docs/design.md` D-84）：**先 harness，后 kernel**。kernel 的挂起/恢复与预算熔断
+> 要求 agent 执行状态可序列化，harness 须先用 `StepRecord`（§9.4）把这个 seam 留出来。
+
+**harness（`AgentRuntime`）** —— 元智能体从「固定阶段」改为 **run 级常驻的 think-act-observe 循环**
+（D-70）；act 空间封闭枚举、**act 是请求而守卫是唯一写者**（D-71）；元/子智能体共用一份运行时，
+派发子智能体是元智能体的一个工具（D-72）。
+
+> 当前实现里元智能体的**决策部分完全不存在**：`select_experts()` 是纯关键词规则、`complete_intent()`
+> 从不调用 LLM（`purpose="intent"` 只被 `FakeLLM` 的分支认识）、`ActivationPlan` 是一张**零生产者
+> 零消费者**的死契约、`run_input.session` **全库无人读取**。文档层面已定稿，见 `design.md` §5.4
+> 与 D-70…D-85。
+
+**kernel** —— 断点续跑 / 预算熔断 / 挂起恢复。
+
+**其余** —— 分歧归因 · 工具调用（L1/L2）· 证据请求通道 · 轮次冻结的完整实现（当前每轮复用同一基线）·
+停滞与不动点检测 · 振荡检测的阈值标定 · OTel · 级联检测实验 · `Retriever.search()`
 （agent 工具侧双接口，见 `docs/rag.md` §9）
