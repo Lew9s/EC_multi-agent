@@ -13,9 +13,9 @@ import json
 
 from pydantic import SecretStr
 
+from ec_renew.agents.experts import render_task, run_expert
 from ec_renew.config import settings as base_settings
 from ec_renew.contracts import ExpertTask, LLMCallMeta, LLMResult, Usage
-from ec_renew.experts import render_task, run_expert
 from ec_renew.llm import DeepSeekLLM, FakeLLM, LLMCache
 
 #: A plausible evidence id — deliberately **not** a run of sequential digits.

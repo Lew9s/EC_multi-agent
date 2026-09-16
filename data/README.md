@@ -16,7 +16,7 @@
 
 ```bash
 # 默认路径 data/zahuo.txt
-python -m ec_renew.ingest
+python -m ec_renew.rag.ingest
 
 # 或者用环境变量指到别处（.env）
 DATA_DIR=data
@@ -50,7 +50,7 @@ CORPUS_FILE=zahuo.txt
 | `变更内容` | 建议 | 补抽结构引用（`301分段`、`FR36`），并生成 `PART_OF` 边 |
 
 * 分隔符是**正则**，可用 `CORPUS_SEPARATOR` 覆盖。
-* 部门名到专业的映射是静态表，见 `src/ec_renew/rag.py::DEPT_TO_DISCIPLINE`。
+* 部门名到专业的映射是静态表，见 `src/ec_renew/rag/graph.py::DEPT_TO_DISCIPLINE`。
   出现表外的部门会落到默认专业 `E03`（任何变更都涉及规范/质量）——
   换语料时记得同步这张表。
 * 若你的语料是**没有字段标签**的自由文本，把抽取器换成 LlamaIndex 的
@@ -61,8 +61,8 @@ CORPUS_FILE=zahuo.txt
 
 | | 行为 |
 | --- | --- |
-| `python -m ec_renew.ingest` | 立刻报错并提示路径，不会产出空索引 |
-| `python -m ec_renew.cli --offline` | **正常可用**（走内存 fixture，不读语料） |
+| `python -m ec_renew.rag.ingest` | 立刻报错并提示路径，不会产出空索引 |
+| `python -m ec_renew.interface.cli --offline` | **正常可用**（走内存 fixture，不读语料） |
 | `pytest` | 依赖真实语料的用例自动 skip；依赖合成语料的用例**照常运行** |
 
 仓库自带一份合成语料 `tests/fixtures/sample_change_orders.txt`（8 张虚构变更单，

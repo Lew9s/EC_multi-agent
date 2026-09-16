@@ -19,14 +19,14 @@ from typing import Any
 
 from neo4j import GraphDatabase
 
-from .config import Settings
-from .contracts import (
+from ..config import Settings
+from ..contracts import (
     EntityRef,
     EvidenceBundle,
     EvidenceMeta,
     GraphExpansion,
 )
-from .errors import PermanentExternalError, TransientError
+from ..errors import PermanentExternalError, TransientError
 
 # --------------------------------------------------------------------------- #
 # Static mapping (demo shortcut)

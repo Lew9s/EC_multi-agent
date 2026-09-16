@@ -28,7 +28,7 @@ from llama_index.core.schema import BaseNode, TransformComponent
 from llama_index.core.vector_stores.types import MetadataFilter, MetadataFilters
 from pydantic import Field
 
-# 领域 schema（design.md §0.3）—— 与 rag.py 的 Cypher 严格一致。
+# 领域 schema（design.md §0.3）—— 与 rag/graph.py 的 Cypher 严格一致。
 DOMAIN_ENTITIES: tuple[str, ...] = (
     "CHANGE_ORDER",
     "COMPONENT",
@@ -193,7 +193,7 @@ def build_kg_extractor(*, mode: str = "rule", offline: bool = False) -> Transfor
 
     from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 
-    from .llm import build_llama_llm
+    from .llm_bridge import build_llama_llm
 
     entities = Literal[DOMAIN_ENTITIES]  # type: ignore[valid-type]
     relations = Literal[DOMAIN_RELATIONS]  # type: ignore[valid-type]

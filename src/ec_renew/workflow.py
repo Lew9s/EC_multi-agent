@@ -24,6 +24,8 @@ import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 
+from .agents.experts import abstain_opinion, run_expert, select_experts
+from .agents.memory import MemoryService
 from .config import settings as default_settings
 from .contracts import (
     DECISION_SCORES,
@@ -46,8 +48,6 @@ from .contracts import (
     Usage,
 )
 from .errors import BudgetExceeded, InvariantViolation, StepLimitExceeded
-from .experts import abstain_opinion, run_expert, select_experts
-from .memory import MemoryService
 from .ports import RunContext as _RunContext
 
 MAX_QUERIES = 5

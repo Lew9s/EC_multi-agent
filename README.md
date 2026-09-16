@@ -29,7 +29,7 @@ RAG 管道用 LlamaIndex 搭建。
 
 ```bash
 # 1) 离线跑通（不需要网络、不需要 key、不需要 docker、不需要语料）
-python -m ec_renew.cli --offline -r "301分段FR36污水井更换加厚板，涉及焊接，需确认合规性"
+python -m ec_renew.interface.cli --offline -r "301分段FR36污水井更换加厚板，涉及焊接，需确认合规性"
 
 # 2) 跑测试（无语料/无 docker 时，相关用例自动 skip 而非失败）
 python -m pytest tests -q
@@ -41,13 +41,13 @@ docker compose up -d
 cp .env.example .env
 
 # 5) 按 data/README.md 的格式自备语料（默认路径 data/zahuo.txt），然后摄取
-python -m ec_renew.ingest
+python -m ec_renew.rag.ingest
 
 # 6) 标定向量阈值（换语料/换模型后必做，详见 docs/rag.md §10）
-python -m ec_renew.rag_llama.calibrate
+python -m ec_renew.rag.calibrate
 
 # 7) 接真实模型
-python -m ec_renew.cli -r "301分段FR36污水井更换加厚板"
+python -m ec_renew.interface.cli -r "301分段FR36污水井更换加厚板"
 ```
 
 ## 依赖安装
@@ -60,6 +60,8 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 
 ## 代码结构
 
+> 下表路径相对 `src/ec_renew/`。
+
 | 文件 | 职责 |
 | --- | --- |
 | `config.py` | 唯一读环境变量处；API key 以 `SecretStr` 持有，业务层拿不到 |
@@ -68,20 +70,20 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 | `llm.py` | `FakeLLM`（离线确定性）+ `DeepSeekLLM`（httpx 直连）+ 响应缓存 |
 | `errors.py` | 异常体系；第三方异常只在适配层翻译一次 |
 | `observability.py` | JSONL 事件日志（`sort_keys=True`，保证重放一致） |
-| `memory.py` | 内容寻址的 `EvidenceRegistry` + 确定性 `MemoryService`（Read/Filter/Project） |
+| `agents/memory.py` | 内容寻址的 `EvidenceRegistry` + 确定性 `MemoryService`（Read/Filter/Project） |
 | `session.py` | 多轮会话状态（Run 无状态 / Session 有状态） |
-| `rag.py` | `Neo4jRetriever`（领域 Cypher，唯一 Cypher 出处之一）+ `InMemoryRetriever` |
-| `experts.py` | 六类专家（L0）+ 规则表选专家 + prompt 构造 + 契约重试 |
+| `rag/graph.py` | `Neo4jRetriever`（领域 Cypher，唯一 Cypher 出处之一）+ `InMemoryRetriever` |
+| `agents/experts.py` | 六类专家（L0）+ 规则表选专家 + prompt 构造 + 契约重试 |
 | `workflow.py` | 主流程 `run()`：意图 → 检索 → 选专家 → 两轮 Delphi → 渲染 |
-| `cli.py` | 对话式命令行 |
+| `interface/cli.py` | 对话式命令行 |
 
-### `rag_llama/` —— LlamaIndex RAG 管道
+### `rag/` —— RAG 管道（LlamaIndex）
 
 | 文件 | 职责 |
 | --- | --- |
 | `corpus.py` | 语料解析：一单一 Document，字段结构化 + `disciplines` 打标 |
 | `embeddings.py` | `ZhipuEmbedding`（智谱 embedding-3）/ `FakeEmbedding`（离线确定性） |
-| `llm.py` | `LlamaLLMBridge`：把项目的 `LLMPort` 接到 LlamaIndex 的 `CustomLLM` |
+| `llm_bridge.py` | `LlamaLLMBridge`：把项目的 `LLMPort` 接到 LlamaIndex 的 `CustomLLM` |
 | `extractors.py` | `DomainTripletExtractor`：确定性领域三元组（标准 `kg_nodes`/`kg_relations`） |
 | `graph_store.py` | Neo4j 领域 schema：建约束 / 写三元组 / 清空 |
 | `vector_store.py` | Qdrant 集合与 payload 索引的显式创建 |
@@ -92,14 +94,14 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 ## 依赖方向
 
 ```
-cli → workflow → experts / rag → ports → contracts
-                    └── memory ──┘
+interface → workflow → agents / rag → ports → contracts
 
-cli → rag_llama.factory → rag_llama.retriever → rag（复用 Cypher 与部门→专业映射）
+interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部门→专业映射）
 ```
 
 `contracts` 不依赖任何业务模块；`workflow` 只见 `agents` 的抽象接口；
-`rag.py` 不 import `rag_llama`，因此不存在循环依赖。
+`rag` 不 import `workflow` / `agents` / `interface`，因此不存在循环依赖。
+这条方向由 `tests/test_layering.py` 守护。
 
 ## 已实现的机制
 

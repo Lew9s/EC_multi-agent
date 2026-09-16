@@ -17,15 +17,15 @@ import asyncio
 import sys
 import uuid
 
-from .config import settings
-from .contracts import HumanDecision, HumanProvidedFact, RunInput
-from .llm import FakeLLM
-from .memory import EvidenceRegistry
-from .observability import JsonlEventLog
-from .ports import RunContext
-from .rag import InMemoryRetriever
-from .session import SessionState, summarize
-from .workflow import run
+from ..agents.memory import EvidenceRegistry
+from ..config import settings
+from ..contracts import HumanDecision, HumanProvidedFact, RunInput
+from ..llm import FakeLLM
+from ..observability import JsonlEventLog
+from ..ports import RunContext
+from ..rag import InMemoryRetriever
+from ..session import SessionState, summarize
+from ..workflow import run
 
 
 def _build_llm(offline: bool):
@@ -37,7 +37,7 @@ def _build_llm(offline: bool):
                 2: {e: "approve" for e in ("E01", "E02", "E03", "E04", "E05", "E06")},
             }
         )
-    from .llm import DeepSeekLLM
+    from ..llm import DeepSeekLLM
 
     return DeepSeekLLM()
 
@@ -47,7 +47,7 @@ def _build_retriever(offline: bool, mode: str | None):
     if offline and (mode is None or mode in {"auto", "memory"}):
         return InMemoryRetriever(), ["backend=memory｜--offline：不访问 Qdrant / Neo4j"]
 
-    from .rag_llama.factory import build_retriever
+    from ..rag.factory import build_retriever
 
     return build_retriever(settings, mode=mode, offline=offline)
 

@@ -13,9 +13,9 @@
 ``ingest`` 一个 async 壳，内部统一丢到工作线程，避免阻塞事件循环。
 
 命令行：
-    python -m ec_renew.ingest --offline          # 无 key 自检（写入假向量）
-    python -m ec_renew.ingest                    # 真实摄取（需要两个 key）
-    python -m ec_renew.ingest --recreate --wipe  # 重建集合与图
+    python -m ec_renew.rag.ingest --offline          # 无 key 自检（写入假向量）
+    python -m ec_renew.rag.ingest                    # 真实摄取（需要两个 key）
+    python -m ec_renew.rag.ingest --recreate --wipe  # 重建集合与图
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ async def ingest(cfg: Settings | None = None, **kwargs: Any) -> IngestReport:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m ec_renew.ingest",
+        prog="python -m ec_renew.rag.ingest",
         description="把变更单语料摄取进 Qdrant（向量）与 Neo4j（领域图）",
     )
     parser.add_argument(

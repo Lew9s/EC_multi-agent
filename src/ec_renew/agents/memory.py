@@ -15,7 +15,7 @@ import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .contracts import (
+from ..contracts import (
     AgentBudget,
     AnonymizedClaim,
     CrossAgentInfo,
