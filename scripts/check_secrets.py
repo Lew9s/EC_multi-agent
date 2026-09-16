@@ -33,6 +33,7 @@
     python scripts/check_secrets.py --staged   # 只扫暂存区（pre-commit 钩子用）
 
 退出码：0 = 干净，1 = 发现问题，2 = 自身错误。
+输出编码固定为 UTF-8，不随控制台 / 管道的 locale 变化（见 ``scripts/_console.py``）。
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from _console import force_utf8_output
 
 # 环境变量名里出现这些词就当成密钥，取它的值做精确比对。
 SECRET_NAME_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH")
@@ -233,6 +236,10 @@ def scan_file(path: Path, root: Path, secrets: dict[str, str]) -> list[Finding]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 先钉编码：本脚本的结论可能是「干净」（退出码 0），若结论本身打印不出来
+    # 就会变成 1，而 pre-commit 钩子只读退出码 —— 见 scripts/_console.py。
+    force_utf8_output()
+
     parser = argparse.ArgumentParser(
         prog="python scripts/check_secrets.py",
         description="扫描将要提交的文件，确认没有密钥泄漏",

@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _console import force_utf8_output
+
 HOOKS_DIR = ".githooks"
 HOOK_FILE = "pre-commit"
 
@@ -48,6 +50,10 @@ def _ensure_executable(root: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 与 check_secrets.py 同一个缺陷：结论行含 ✔ 与中文，在非 UTF-8 管道下
+    # 会抛 UnicodeEncodeError。见 scripts/_console.py。
+    force_utf8_output()
+
     parser = argparse.ArgumentParser(description="安装/卸载仓库自带的 git 钩子")
     parser.add_argument("--uninstall", action="store_true", help="恢复 git 默认钩子路径")
     args = parser.parse_args(argv)
