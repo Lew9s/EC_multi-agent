@@ -14,6 +14,9 @@ Conventions
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Annotated, Literal
@@ -239,6 +242,32 @@ class AssuranceLevel(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def make_claim_id(claim: str, condition: str | None, evidence_ids: Sequence[str]) -> str:
+    """Content-addressed claim identity (D-78).
+
+    The same claim + condition + evidence gets the same id anywhere in a run.
+    That is what makes the disclosure graph and the "披露-改变率" metric
+    computable (§8.5.6): "which claim changed whose opinion?" becomes a set
+    operation instead of a text comparison that any whitespace difference or
+    two experts saying the same sentence would break.
+
+    Deliberately **excludes** ``discipline``: including it would give one
+    argument two different ids depending on who raised it, and would hide the
+    informative case of two disciplines independently raising the same
+    constraint.
+
+    This is derived by code and exposed as a computed field, so unlike
+    ``expert`` it does not even need overwriting at parse time — a model
+    cannot forge what is not an input field.
+    """
+    payload = json.dumps(
+        {"claim": claim, "condition": condition or "", "evidence_ids": sorted(evidence_ids)},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return "C-" + hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
 class Claim(BaseModel):
     """Smallest unit that may cross an agent boundary.
 
@@ -253,6 +282,11 @@ class Claim(BaseModel):
     condition: SingleLineText | None = None
     evidence_ids: list[str] = Field(min_length=1)
     discipline: str = "E01"
+
+    @computed_field
+    @property
+    def claim_id(self) -> str:
+        return make_claim_id(self.claim, self.condition, self.evidence_ids)
 
     @field_validator("condition", mode="before")
     @classmethod
@@ -281,6 +315,13 @@ class AnonymizedClaim(BaseModel):
     claim: ClaimText
     condition: SingleLineText | None = None
     evidence_ids: list[str] = Field(min_length=1)
+
+    @computed_field
+    @property
+    def claim_id(self) -> str:
+        """Same id as the originating ``Claim``, since the three source fields
+        are identical — that identity is what the disclosure record stores."""
+        return make_claim_id(self.claim, self.condition, self.evidence_ids)
 
     @classmethod
     def from_claim(cls, claim: Claim) -> AnonymizedClaim:
@@ -316,7 +357,11 @@ class ReviewFeedback(BaseModel):
     round: int = 1
     consensus_score: float = 0.0
     dissent_count: int = 0
-    anonymous_dissent: list[str] = Field(default_factory=list)
+    # Claim **ids**, not text: this field feeds the disclosure graph (§8.5.6),
+    # where a stable identity is required to answer "which claim changed whose
+    # opinion?" (D-78). Distinct claims only — two experts raising the same
+    # argument share an id on purpose.
+    anonymous_dissent_ids: list[str] = Field(default_factory=list)
 
 
 class RevisionContext(BaseModel):
@@ -331,8 +376,15 @@ class ProjectionRecord(BaseModel):
     round: int
     expert: str
     policy: DisclosurePolicy
+    #: Claim **ids** (``C-…``), not claim text: §8.5.6 promises the disclosure
+    #: graph is reconstructible and usable as a research metric, and both need
+    #: a stable identity (D-78).
     disclosed_claim_ids: list[str] = Field(default_factory=list)
-    hard_constraint_ids: list[str] = Field(default_factory=list)
+    #: Constraints stay as **text**, deliberately asymmetric with claims:
+    #: constraints are broadcast unconditionally (D-56) rather than aggregated,
+    #: they are already bounded (D-77), and the metric's subject is claims.
+    #: Inventing a second id scheme here would be abstraction without a user.
+    hard_constraints: list[str] = Field(default_factory=list)
 
 
 class AgentBudget(BaseModel):

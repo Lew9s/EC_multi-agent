@@ -182,10 +182,13 @@ class MemoryService:
         baseline_ids = self._reg.baseline(round_no)
 
         cross: CrossAgentInfo | None = None
-        disclosed: list[str] = []
+        disclosed_ids: list[str] = []
         if policy is DisclosurePolicy.ANONYMOUS_CLAIMS:
             visible = collect_claims(opinions, exclude=expert)
-            disclosed = [c.claim for c in visible]
+            # Ids, not text: the disclosure graph (§8.5.6) is only computable if
+            # a claim has an identity (D-78). Deduplicated, because two experts
+            # independently raising the same argument legitimately share an id.
+            disclosed_ids = sorted({c.claim_id for c in visible})
             cross = CrossAgentInfo(
                 anonymous_claims=visible,
                 # Hard constraints bypass Filter entirely.
@@ -203,7 +206,7 @@ class MemoryService:
                     round=round_no,
                     consensus_score=consensus_score,
                     dissent_count=dissent_count,
-                    anonymous_dissent=sorted(disclosed),
+                    anonymous_dissent_ids=disclosed_ids,
                 ),
             )
 
@@ -224,7 +227,7 @@ class MemoryService:
             round=round_no,
             expert=expert,
             policy=policy,
-            disclosed_claim_ids=sorted(disclosed),
-            hard_constraint_ids=sorted(cross.hard_constraints) if cross else [],
+            disclosed_claim_ids=disclosed_ids,
+            hard_constraints=sorted(cross.hard_constraints) if cross else [],
         )
         return task, record

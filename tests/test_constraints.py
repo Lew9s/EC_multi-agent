@@ -18,12 +18,14 @@ from ec_renew.contracts import (
     MAX_RATIONALE_CHARS,
     MAX_UNCERTAINTY_CHARS,
     AnonymizedClaim,
+    Claim,
     DisclosurePolicy,
     ExpertOpinion,
     ExpertTask,
     LLMResult,
     RevisionContext,
     Usage,
+    make_claim_id,
 )
 from ec_renew.experts import (
     abstain_opinion,
@@ -168,7 +170,7 @@ def test_revision_context_carries_own_previous_and_new_evidence() -> None:
     assert task.revision is not None
     assert task.revision.own_previous.expert == "E01"
     # An expert revising its own opinion gets no peer claims back.
-    assert task.revision.feedback.anonymous_dissent == []
+    assert task.revision.feedback.anonymous_dissent_ids == []
 
 
 # --------------------------------------------------------------------------- #
@@ -313,6 +315,98 @@ def test_claim_discipline_is_overwritten_by_the_parser() -> None:
     )
     op = parse_opinion("E01", raw, [EID])
     assert op.claims[0].discipline == "E01"
+
+
+# --------------------------------------------------------------------------- #
+# D-78 — a claim has a stable identity
+# --------------------------------------------------------------------------- #
+
+
+def test_claim_id_is_content_addressed_and_ignores_discipline() -> None:
+    """One argument, one id — no matter who raised it."""
+    base = {"claim": "若设备安装先于开孔，则存在可达性冲突", "evidence_ids": [EID]}
+    a = Claim(**base, discipline="E02")
+    b = Claim(**base, discipline="E06")
+    assert a.claim_id == b.claim_id
+    assert a.claim_id.startswith("C-")
+    # A different condition is a different argument.
+    assert Claim(**base, condition="在甲板已合拢的前提下", discipline="E02").claim_id != a.claim_id
+
+
+def test_claim_id_cannot_be_forged() -> None:
+    """It is a *computed* field, so it is not an input field at all."""
+    c = Claim.model_validate(
+        {"claim": "结论", "evidence_ids": [EID], "claim_id": "C-deadbeef0000"}
+    )
+    assert c.claim_id == make_claim_id("结论", None, [EID])
+
+
+def test_anonymized_claim_shares_the_source_claim_id() -> None:
+    c = Claim(claim="结论", evidence_ids=[EID], discipline="E06")
+    assert AnonymizedClaim.from_claim(c).claim_id == c.claim_id
+
+
+def test_projection_record_stores_ids_not_text() -> None:
+    """§8.5.6 promises the disclosure graph is reconstructible and usable as a
+    metric; both need an identity, not a copy of the prose."""
+    registry = EvidenceRegistry()
+    eid = registry.register(source="graph", content="case A").evidence_id
+    registry.freeze(2, [eid])
+    peer = ExpertOpinion(
+        expert="E02",
+        decision="reject",
+        evidence_ids=[eid],
+        claims=[{"claim": "独一无二的论据", "evidence_ids": [eid], "discipline": "E02"}],
+    )
+    task, record = MemoryService(registry).project(
+        expert="E01", request="r", round_no=2, opinions=[peer]
+    )
+    assert task.cross_agent is not None
+    assert record.disclosed_claim_ids == [task.cross_agent.anonymous_claims[0].claim_id]
+    assert all(cid.startswith("C-") for cid in record.disclosed_claim_ids)
+    assert record.disclosed_claim_ids != ["独一无二的论据"]
+
+
+def test_projection_record_keeps_hard_constraints_as_text() -> None:
+    """The asymmetry is deliberate: constraints are broadcast (D-56), not
+    aggregated, so they are recorded verbatim instead of getting their own id
+    scheme."""
+    registry = EvidenceRegistry()
+    eid = registry.register(source="graph", content="case A").evidence_id
+    registry.freeze(2, [eid])
+    peer = ExpertOpinion(
+        expert="E02", decision="reject", evidence_ids=[eid], constraints=["必须复核"]
+    )
+    _, record = MemoryService(registry).project(
+        expert="E01", request="r", round_no=2, opinions=[peer]
+    )
+    assert record.hard_constraints == ["必须复核"]
+
+
+def test_identical_peer_claims_share_one_disclosure_id() -> None:
+    """Two disciplines independently raising the same constraint is the
+    informative case — the record must not count it twice."""
+    registry = EvidenceRegistry()
+    eid = registry.register(source="graph", content="case A").evidence_id
+    registry.freeze(2, [eid])
+    peers = [
+        ExpertOpinion(
+            expert=e,
+            decision="reject",
+            evidence_ids=[eid],
+            claims=[{"claim": "同一约束", "evidence_ids": [eid], "discipline": e}],
+        )
+        for e in ("E02", "E06")
+    ]
+    task, record = MemoryService(registry).project(
+        expert="E01", request="r", round_no=2, opinions=peers
+    )
+    assert task.cross_agent is not None
+    assert len(task.cross_agent.anonymous_claims) == 2, "both are still disclosed"
+    assert len({c.claim_id for c in task.cross_agent.anonymous_claims}) == 1
+    assert record.disclosed_claim_ids == sorted(
+        {c.claim_id for c in task.cross_agent.anonymous_claims}
+    )
 
 
 # --------------------------------------------------------------------------- #
