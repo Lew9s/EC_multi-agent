@@ -1,0 +1,17 @@
+# 统一按 LF 存库：项目在 Windows 上开发，但 CI 与协作者可能是 Linux/macOS。
+# 不设这一条，中文语料与源码会在不同平台间反复出现整文件 diff。
+* text=auto eol=lf
+
+# 刻意不写 working-tree-encoding：语料本来就是 UTF-8，
+# 加上它只会在缺 iconv 的环境里让 checkout 失败，没有收益。
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.docx binary
+
+# 让 GitHub 的语言统计与 diff 更准确
+*.jsonl linguist-language=JSON
+docs/*.md linguist-documentation

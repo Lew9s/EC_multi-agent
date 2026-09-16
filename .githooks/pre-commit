@@ -1,0 +1,40 @@
+#!/bin/sh
+# 提交前闸门 —— AGENTS.md §6
+#
+# 只做**快速**检查：密钥扫描 + 暂存文件的静态检查。
+# 故意不跑全量测试（那会让每次提交变慢，最终一定会被人用 --no-verify 绕过，
+# 反而比没有钩子更糟）。全量测试由人工与 CI 负责。
+#
+# 安装：python scripts/install_hooks.py
+
+set -u
+
+PY="${PYTHON:-python}"
+
+# ---- 1) 密钥扫描：只扫暂存区 ------------------------------------------------ #
+# 这是防泄漏最有效的一道闸门：即使 .gitignore 写漏了，也在这里被拦下。
+if ! "$PY" scripts/check_secrets.py --staged; then
+    echo ""
+    echo "✖ 提交被阻止：暂存区里有疑似密钥（见上方输出）。"
+    echo "  确认是误报请改 scripts/check_secrets.py 的 ALLOWLIST 并说明理由，"
+    echo "  不要用 --no-verify 绕过（AGENTS.md §1.1）。"
+    exit 1
+fi
+
+# ---- 2) ruff：只查本次暂存的 .py -------------------------------------------- #
+# 注意：这里依赖未加引号的 $files 做词分割。本仓库的文件名不含空格，
+# 若将来引入含空格的路径，请改用 xargs -0。
+files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+if [ -n "$files" ]; then
+    if "$PY" -m ruff --version >/dev/null 2>&1; then
+        if ! "$PY" -m ruff check $files; then
+            echo ""
+            echo "✖ 提交被阻止：ruff 未通过。"
+            exit 1
+        fi
+    else
+        echo "· 未安装 ruff，跳过静态检查（CI 仍会执行）"
+    fi
+fi
+
+exit 0

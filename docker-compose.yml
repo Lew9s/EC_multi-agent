@@ -1,0 +1,66 @@
+# RAG 依赖的两个存储：Qdrant（向量）+ Neo4j（图）。
+#
+# 启动：   docker compose up -d
+# 状态：   docker compose ps
+# 停止：   docker compose down          （数据保留在 named volume 里）
+# 清空：   docker compose down -v       （连数据一起删）
+#
+# 凭据统一来自项目根目录的 .env（compose 会自动读取），
+# 因此这里不写死任何密码 —— 见 .env.example。
+# 单独覆盖密码：在 .env 里改 NEO4J_PASSWORD 后 docker compose up -d 重新创建容器。
+
+name: ec-renew-rag
+
+services:
+  # ---- 向量库 ------------------------------------------------------------ #
+  qdrant:
+    # 与 pyproject 的 qdrant-client 版本对齐：minor 差超过 1 客户端会告警。
+    image: qdrant/qdrant:v1.17.1
+    container_name: ec-renew-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"   # REST / Web UI
+      - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC（qdrant-client 优先走这条）
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # 本地实验默认不开鉴权。若要开：在 .env 里设 QDRANT_API_KEY=xxx
+    # 并取消下面两行的注释（Qdrant 只在变量非空时才启用鉴权）。
+    # environment:
+    #   QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    healthcheck:
+      # 官方镜像自带 bash，但更稳妥的是用 qdrant 自己的只读端点做探活。
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ---- 图库 -------------------------------------------------------------- #
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: ec-renew-neo4j
+    restart: unless-stopped
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"    # Browser
+      - "${NEO4J_BOLT_PORT:-7687}:7687"    # Bolt（driver 连接口）
+    environment:
+      # 格式固定为 user/password；密码取自 .env，缺省仅用于本地实验。
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-changeme}"
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+      # 本项目的领域 schema 由 rag_llama/graph_store.py 写入，不需要 APOC 插件。
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
