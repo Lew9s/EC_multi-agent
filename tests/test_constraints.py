@@ -13,14 +13,14 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from ec_renew.agents.experts import (
+from ec_renew.agents.memory import EvidenceRegistry, MemoryService
+from ec_renew.agents.skills.expert_review import (
     abstain_opinion,
     parse_opinion,
     render_task,
     repair_opinion,
     run_expert,
 )
-from ec_renew.agents.memory import EvidenceRegistry, MemoryService
 from ec_renew.contracts import (
     MAX_CONSTRAINT_CHARS,
     MAX_RATIONALE_CHARS,

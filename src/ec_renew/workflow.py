@@ -202,6 +202,20 @@ def consensus(
     return score, effective, "approved" if score >= threshold else "retry"
 
 
+def _knowledge_share(opinions: dict[str, ExpertOpinion], weights: dict[str, float]) -> float:
+    """声明 ``basis="knowledge"`` 的权重占比（与共识分同口径：分母是配置权重和）。
+
+    用来决定保证等级是否该降级：证据命中了历史案例，不代表专家用了它作依据。
+    """
+    total = sum(weights.get(expert, 0.0) for expert in weights)
+    if not total:
+        return 0.0
+    knowledge = sum(
+        weights.get(expert, 0.0) for expert, op in opinions.items() if op.basis == "knowledge"
+    )
+    return knowledge / total
+
+
 # --------------------------------------------------------------------------- #
 # Stage 4b — fixed-point detection
 # --------------------------------------------------------------------------- #
@@ -353,6 +367,7 @@ def render_markdown(
         name = DISCIPLINE_NAMES.get(expert, expert)
         lines.append(f"### {expert} {name} — {op.decision}")
         lines.append("")
+        lines.append(f"- 依据：{op.basis}")
         lines.append(f"- 风险等级：{op.risk_level}")
         if op.rationale:
             lines.append(f"- 理由：{op.rationale}")
@@ -532,10 +547,26 @@ async def run(
         oscillation=stall.reversals,
     )
 
+    # 保证等级必须反映**专家实际用的依据**，而不只是「检索有没有命中」。真实 run 里出现过
+    # 「4 位专家全凭领域通识判断、系统却报 history_backed」——那等于替一次通识推断背书。
+    # 规则与共识分同口径：以**配置权重和**为分母，声明 basis="knowledge" 的权重占比 > 0.5
+    # 即降级，并在 inference_basis 里写明原因。
+    knowledge_share = _knowledge_share(loop.latest, loop.weights)
+    downgraded = grounding.has_history and knowledge_share > 0.5
+    level = "knowledge_based" if (not grounding.has_history or downgraded) else "history_backed"
+    inference_basis: list[str] = []
+    if not grounding.has_history:
+        inference_basis = [grounding.note]
+    elif downgraded:
+        reason = (
+            f"{knowledge_share:.0%} 的权重来自声明 basis=knowledge 的专家："
+            "本轮证据未支撑其技术细节，故降为 knowledge_based"
+        )
+        inference_basis = [reason]
     assurance = AssuranceLevel(
-        level="history_backed" if grounding.has_history else "knowledge_based",
-        supporting_evidence=sorted(bundle.baseline_ids) if grounding.has_history else [],
-        inference_basis=[] if grounding.has_history else [grounding.note],
+        level=level,
+        supporting_evidence=sorted(bundle.baseline_ids) if level == "history_backed" else [],
+        inference_basis=inference_basis,
     )
     ctx.events.emit(
         "run_finished",

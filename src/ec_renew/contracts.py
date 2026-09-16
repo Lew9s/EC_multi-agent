@@ -425,6 +425,12 @@ class ExpertTask(BaseModel):
 class ExpertOpinion(BaseModel):
     expert: str
     decision: ReviewDecision
+    #: 判断依据（§5.7）：证据 / 领域通识 / 两者并重。
+    #:
+    #: 它由专家**如实声明**，用来给保证等级降级：本轮证据给不出技术细节时，专家仍应基于领域
+    #: 通识给出判断（见技能 ``agents/skills/expert_review/SKILL.md``），但那样的判断不该冒充
+    #: ``history_backed``。缺省 ``evidence`` 是为了与既有假适配器/夹具保持兼容。
+    basis: Literal["evidence", "knowledge", "mixed"] = "evidence"
     rationale: str = Field(default="", max_length=MAX_RATIONALE_CHARS)
     evidence_ids: list[str] = Field(min_length=1)
     claims: list[Claim] = Field(default_factory=list)
