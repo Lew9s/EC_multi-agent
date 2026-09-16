@@ -264,6 +264,33 @@ class Claim(BaseModel):
         return value
 
 
+class AnonymizedClaim(BaseModel):
+    """A claim **as it crosses an agent boundary** (D-77).
+
+    Deliberately has no ``discipline`` field. ``E01``..``E06`` map one-to-one
+    onto the six experts, so carrying it would be a de-facto identity
+    disclosure — forbidden by D-50 and §8.4.5. Before this type existed, the
+    only thing keeping identity out of a peer's prompt was the fact that
+    ``render_task`` happened not to print the field.
+
+    The field set *is* the guarantee: adding a field to ``Claim`` (which stays
+    inside the run state, where discipline is legitimate research data) does
+    not widen what crosses. A test pins the exact field set.
+    """
+
+    claim: ClaimText
+    condition: SingleLineText | None = None
+    evidence_ids: list[str] = Field(min_length=1)
+
+    @classmethod
+    def from_claim(cls, claim: Claim) -> AnonymizedClaim:
+        return cls(
+            claim=claim.claim,
+            condition=claim.condition,
+            evidence_ids=list(claim.evidence_ids),
+        )
+
+
 class DisclosurePolicy(str, Enum):
     NONE = "none"
     ANONYMOUS_CLAIMS = "anon_claims"
@@ -277,7 +304,7 @@ class DisclosurePolicy(str, Enum):
 class CrossAgentInfo(BaseModel):
     """What the meta agent is allowed to show a sub agent about its peers."""
 
-    anonymous_claims: list[Claim] = Field(default_factory=list)
+    anonymous_claims: list[AnonymizedClaim] = Field(default_factory=list)
     hard_constraints: list[str] = Field(default_factory=list)
     consensus_score: float = 0.0
     dissent_count: int = 0

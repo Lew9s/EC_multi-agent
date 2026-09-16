@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from ec_renew.contracts import (
     MAX_CONSTRAINT_CHARS,
     MAX_RATIONALE_CHARS,
     MAX_UNCERTAINTY_CHARS,
+    AnonymizedClaim,
     DisclosurePolicy,
     ExpertOpinion,
     ExpertTask,
@@ -23,7 +25,13 @@ from ec_renew.contracts import (
     RevisionContext,
     Usage,
 )
-from ec_renew.experts import abstain_opinion, render_task, repair_opinion, run_expert
+from ec_renew.experts import (
+    abstain_opinion,
+    parse_opinion,
+    render_task,
+    repair_opinion,
+    run_expert,
+)
 from ec_renew.memory import EvidenceRegistry, MemoryService
 from ec_renew.rag import disciplines_for_departments
 from ec_renew.workflow import consensus
@@ -122,9 +130,8 @@ def test_round_two_discloses_anonymous_claims_but_excludes_own() -> None:
         expert="E01", request="r", round_no=2, opinions=peers
     )
     assert task.cross_agent is not None
-    disciplines = {c.discipline for c in task.cross_agent.anonymous_claims}
-    assert "E01" not in disciplines, "an expert must not receive its own claim back"
-    assert disciplines == {"E03"}
+    texts = {c.claim for c in task.cross_agent.anonymous_claims}
+    assert texts == {"E03 的匿名约束"}, "an expert must not receive its own claim back"
     # Hard constraints bypass filtering entirely.
     assert set(task.cross_agent.hard_constraints) == {"E01 的硬约束", "E03 的硬约束"}
 
@@ -246,6 +253,66 @@ def test_baseline_is_sorted_and_drops_unknown_ids() -> None:
 def test_unknown_department_maps_to_quality() -> None:
     assert disciplines_for_departments(["船体车间"]) == ["E01"]
     assert "E03" in disciplines_for_departments(["某个不认识的部门"])
+
+
+# --------------------------------------------------------------------------- #
+# D-50 / D-77 — the projection boundary carries no identity
+# --------------------------------------------------------------------------- #
+
+
+def test_anonymized_claim_field_set_is_frozen() -> None:
+    """The *type* is the guarantee. A field added to ``Claim`` later (it stays
+    inside the run state, where ``discipline`` is legitimate research data)
+    must not silently start crossing to peers."""
+    assert set(AnonymizedClaim.model_fields) == {"claim", "condition", "evidence_ids"}
+
+
+def test_projection_leaks_no_peer_identity() -> None:
+    """``Claim.discipline`` maps one-to-one onto the six experts, so a
+    projection that carried it would disclose who said what (D-50, §8.4.5)."""
+    registry = EvidenceRegistry()
+    eid = registry.register(source="graph", content="case A").evidence_id
+    registry.freeze(2, [eid])
+    peers = [
+        ExpertOpinion(
+            expert=expert,
+            decision="reject",
+            evidence_ids=[eid],
+            # Neutral wording on purpose: the claim text must not be the reason
+            # the assertion below passes.
+            claims=[{"claim": f"约束{i}", "evidence_ids": [eid], "discipline": expert}],
+        )
+        for i, expert in enumerate(("E01", "E02", "E03", "E04", "E05"))
+    ]
+
+    task, _ = MemoryService(registry).project(
+        expert="E01", request="r", round_no=2, opinions=peers
+    )
+    assert task.cross_agent is not None
+    dumped = task.cross_agent.model_dump_json()
+    assert not re.search(r"E0[1-6]", dumped), f"peer identity reached the projection: {dumped}"
+    assert len(task.cross_agent.anonymous_claims) == 4
+
+
+def test_claim_discipline_is_overwritten_by_the_parser() -> None:
+    """Discipline is research data (§8.5.6), so it must record who actually
+    spoke — not what the model says about itself. Same rule as ``expert``."""
+    raw = json.dumps(
+        {
+            "decision": "approve",
+            "evidence_ids": [EID],
+            "claims": [
+                {
+                    "claim": "某专业的结论",
+                    "evidence_ids": [EID],
+                    "discipline": "E06",  # 冒用他人身份
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    op = parse_opinion("E01", raw, [EID])
+    assert op.claims[0].discipline == "E01"
 
 
 # --------------------------------------------------------------------------- #
