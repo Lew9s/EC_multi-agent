@@ -29,10 +29,10 @@ from .contracts import (
     Claim,
     ExpertOpinion,
     ExpertTask,
+    LLMCallMeta,
     Usage,
 )
 from .errors import ContractViolation
-from .llm import ctx_header
 from .ports import EventSinkPort, LLMPort
 
 # --------------------------------------------------------------------------- #
@@ -145,10 +145,15 @@ def select_experts(
 
 
 def render_task(task: ExpertTask) -> str:
-    parts: list[str] = [
-        ctx_header(expert=task.expert, round=task.round, mode=task.mode)
-    ]
-    parts.append(f"## 变更请求\n{task.request}")
+    """Render one expert's prompt body.
+
+    Note what is deliberately *not* here: the machine-readable context (expert /
+    round / mode) travels to the LLM port as ``LLMCallMeta`` instead (design
+    §12 1f). That is what makes two rounds over an unchanged frozen baseline
+    render byte-identical prompts — the property §5.4.4's fixed-point argument
+    and the ``stalled`` status rest on.
+    """
+    parts: list[str] = [f"## 变更请求\n{task.request}"]
 
     if task.sub_questions:
         lines = "\n".join(f"- {q.text}（领域 {q.discipline}）" for q in task.sub_questions)
@@ -390,12 +395,16 @@ async def run_expert(
     """
     system = system_for(task.expert)
     user = render_task(task)
+    # Out-of-band call context (design §12 1f). The contract retry reuses the
+    # same meta: what makes it a different call is the appended error section in
+    # `user`, and the cache key covers both parts.
+    meta = LLMCallMeta(expert=task.expert, round=task.round, mode=task.mode)
     last_error = ""
     last_raw = ""
     usage = Usage()
 
     for attempt in range(1, max_contract_retries + 2):
-        result = await llm.complete(purpose="expert", system=system, user=user)
+        result = await llm.complete(purpose="expert", system=system, user=user, meta=meta)
         usage = usage + result.usage
         last_raw = result.content
         try:

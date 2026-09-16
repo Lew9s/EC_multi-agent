@@ -8,6 +8,11 @@
 
 Both go through ``LLMCache``: content-addressed, so re-running an experiment is
 free and byte-reproducible.
+
+Machine-readable call context (expert / round / mode) reaches both adapters as
+``LLMCallMeta`` — delivered **out of band** rather than embedded in the prompt
+(design §12 1f). It is part of the cache key, so moving it out of the message
+text cannot silently collapse two different rounds onto one cached answer.
 """
 
 from __future__ import annotations
@@ -24,40 +29,19 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .config import settings as default_settings
-from .contracts import LLMResult, Usage
+from .contracts import LLMCallMeta, LLMResult, Usage
 from .errors import PermanentExternalError, RateLimited, TransientError
 
 # --------------------------------------------------------------------------- #
-# Prompt context header
+# Evidence id scanning
 # --------------------------------------------------------------------------- #
 
-_CTX_RE = re.compile(r"\[\[CTX\s+(?P<body>[^\]]*)\]\]")
+#: ``E-`` + 12 hex chars — the evidence ids the fake adapter cites.
+#:
+#: The context that used to ride along in a ``[[CTX expert=… round=…]]`` prompt
+#: header is now passed out of band as ``LLMCallMeta`` (design §12 1f), so there
+#: is deliberately no prompt-header parser left in this module.
 _EID_RE = re.compile(r"E-[0-9a-f]{12}")
-
-
-def ctx_header(**kv: object) -> str:
-    """Machine-readable context line embedded in prompts.
-
-    Keeps the fake adapter honest (it reads the same context the real model
-    does) and makes event logs self-describing.
-    """
-    def _clean(value: object) -> str:
-        return str(value).replace(" ", "_").replace("\n", "_")
-
-    body = " ".join(f"{k}={_clean(v)}" for k, v in kv.items())
-    return f"[[CTX {body}]]"
-
-
-def parse_ctx(text: str) -> dict[str, str]:
-    match = _CTX_RE.search(text)
-    if not match:
-        return {}
-    out: dict[str, str] = {}
-    for part in match.group("body").split():
-        if "=" in part:
-            key, value = part.split("=", 1)
-            out[key] = value
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -80,9 +64,30 @@ class LLMCache:
             self.dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def key(model: str, system: str, user: str, params: dict[str, Any]) -> str:
+    def key(
+        model: str,
+        system: str,
+        user: str,
+        params: dict[str, Any],
+        meta: LLMCallMeta | None = None,
+    ) -> str:
+        """Content-addressed key for one call.
+
+        ``meta`` is part of the key **on purpose**. Round / expert / mode used to
+        live inside ``user`` as a header line, so they were already key material;
+        lifting them out of the message text without folding them back in here
+        would let round 2 hit round 1's cached answer for the same expert — same
+        prompt text, different question. See
+        ``test_call_meta_is_part_of_the_cache_key``.
+        """
         payload = json.dumps(
-            {"model": model, "system": system, "user": user, "params": params},
+            {
+                "model": model,
+                "system": system,
+                "user": user,
+                "params": params,
+                "meta": meta.model_dump() if meta is not None else None,
+            },
             sort_keys=True,
             ensure_ascii=False,
         )
@@ -128,16 +133,22 @@ class FakeLLM:
     def __init__(self, plan: dict[int, dict[str, str]] | None = None) -> None:
         self.plan = plan or {}
 
-    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult:
+    async def complete(
+        self,
+        *,
+        purpose: str,
+        system: str,
+        user: str,
+        meta: LLMCallMeta | None = None,
+    ) -> LLMResult:
         await asyncio.sleep(0)  # keep it a real coroutine
-        ctx = parse_ctx(user) or parse_ctx(system)
 
         if purpose == "intent":
-            content = json.dumps(self._intent(ctx, user), ensure_ascii=False)
+            content = json.dumps(self._intent(user), ensure_ascii=False)
         elif purpose == "expert":
-            content = json.dumps(self._opinion(ctx, user), ensure_ascii=False)
+            content = json.dumps(self._opinion(meta, user), ensure_ascii=False)
         else:
-            content = str(ctx.get("expert", "system"))
+            content = (meta.expert if meta is not None else "") or "system"
 
         return LLMResult(
             content=content,
@@ -155,8 +166,17 @@ class FakeLLM:
     def _evidence_ids(user: str) -> list[str]:
         return sorted(set(_EID_RE.findall(user)))
 
-    def _intent(self, ctx: dict[str, str], user: str) -> dict[str, Any]:
-        request = ctx.get("request", "")
+    def _intent(self, user: str) -> dict[str, Any]:
+        """Best-effort request text for the fake's intent branch.
+
+        This branch has no producer in the pipeline today (``complete_intent``
+        never calls the LLM), and the ``request=`` field it used to read out of
+        the ``[[CTX …]]`` header was never written by any caller — so it had
+        already been degrading to an empty string. With the header gone, the
+        request is taken from the user message, which is where a real intent
+        call would put it.
+        """
+        request = next((line.strip() for line in user.splitlines() if line.strip()), "")
         return {
             "sub_questions": [
                 {"text": f"{request} 的合规性", "discipline": "E03", "priority": 0.7}
@@ -164,9 +184,9 @@ class FakeLLM:
             "query_set": [request] if request else [],
         }
 
-    def _opinion(self, ctx: dict[str, str], user: str) -> dict[str, Any]:
-        expert = ctx.get("expert", "E01")
-        round_no = int(ctx.get("round", "1") or 1)
+    def _opinion(self, meta: LLMCallMeta | None, user: str) -> dict[str, Any]:
+        expert = (meta.expert if meta is not None else "") or "E01"
+        round_no = (meta.round if meta is not None else 0) or 1
         evidence_ids = self._evidence_ids(user)
 
         decision = self.plan.get(round_no, {}).get(expert)
@@ -239,7 +259,14 @@ class DeepSeekLLM:
             await self._client.aclose()
             self._client = None
 
-    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult:
+    async def complete(
+        self,
+        *,
+        purpose: str,
+        system: str,
+        user: str,
+        meta: LLMCallMeta | None = None,
+    ) -> LLMResult:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -248,7 +275,10 @@ class DeepSeekLLM:
             ],
             **self._params,
         }
-        cache_key = LLMCache.key(self._model, system, user, self._params)
+        # `meta` is deliberately absent from `body`: it is our bookkeeping, not
+        # something the provider should see. It must, however, be part of the
+        # cache key — see LLMCache.key.
+        cache_key = LLMCache.key(self._model, system, user, self._params, meta)
         hit = self._cache.get(cache_key)
         if hit is not None:
             return hit.model_copy(update={"cached": True})

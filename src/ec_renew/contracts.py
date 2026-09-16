@@ -524,6 +524,27 @@ class Usage(BaseModel):
         )
 
 
+class LLMCallMeta(BaseModel):
+    """Machine-readable metadata for one LLM call (design §12 1f).
+
+    It deliberately does **not** travel inside the message content. It is handed
+    to the port out of band so the cache key, the event log and the fake adapter
+    can see *which* call this is, without the model having to read a header line
+    and without that line perturbing the prompt.
+
+    Why it is more than hygiene: with the round counter out of the prompt, two
+    consecutive rounds over an unchanged frozen baseline render a **byte-identical**
+    prompt, which is what upgrades §5.4.4's fixed-point argument from "no further
+    information gain" to a proof that the next round could only repeat this one.
+    It also keeps the prompt prefix stable across rounds, so the provider's
+    KV cache can actually hit.
+    """
+
+    expert: str = ""
+    round: int = 0
+    mode: str = ""
+
+
 class LLMResult(BaseModel):
     content: str
     reasoning: str = ""
