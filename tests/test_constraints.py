@@ -22,6 +22,7 @@ from ec_renew.contracts import (
     DisclosurePolicy,
     ExpertOpinion,
     ExpertTask,
+    LLMCallMeta,
     LLMResult,
     RevisionContext,
     RunInput,
@@ -35,7 +36,6 @@ from ec_renew.experts import (
     repair_opinion,
     run_expert,
 )
-from ec_renew.llm import parse_ctx
 from ec_renew.memory import EvidenceRegistry, MemoryService
 from ec_renew.observability import NullEventLog
 from ec_renew.ports import RunContext
@@ -474,8 +474,17 @@ class _FixedPointLLM:
     def __init__(self, *, vary_rationale: bool = False) -> None:
         self.vary_rationale = vary_rationale
 
-    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult:
-        round_no = int(parse_ctx(user).get("round", "1") or 1)
+    async def complete(
+        self,
+        *,
+        purpose: str,
+        system: str,
+        user: str,
+        meta: LLMCallMeta | None = None,
+    ) -> LLMResult:
+        # The round counter used to be parsed back out of the prompt's CTX
+        # header; it now arrives out of band (design §12 1f).
+        round_no = (meta.round if meta is not None else 0) or 1
         cited = sorted(set(re.findall(r"E-[0-9a-f]{12}", user))) or [EID]
         rationale = f"第 {round_no} 轮的考虑" if self.vary_rationale else "同样的考虑"
         return LLMResult(
@@ -802,7 +811,14 @@ class _StubbornLLM:
         self.payload = payload
         self.calls = 0
 
-    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult:
+    async def complete(
+        self,
+        *,
+        purpose: str,
+        system: str,
+        user: str,
+        meta: LLMCallMeta | None = None,
+    ) -> LLMResult:
         self.calls += 1
         return LLMResult(content=self.payload, model="stubborn", usage=Usage(calls=1))
 

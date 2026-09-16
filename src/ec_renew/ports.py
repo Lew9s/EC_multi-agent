@@ -21,6 +21,7 @@ from .contracts import (
     GraphExpansion,
     HumanDecision,
     HumanReviewRequest,
+    LLMCallMeta,
     LLMResult,
     ProjectionRecord,
 )
@@ -38,9 +39,18 @@ class LLMPort(Protocol):
     ``purpose`` labels the call (``intent`` / ``expert`` / ``finalize``) so the
     fake adapter can dispatch on it, and so cache keys and event logs stay
     readable.
+
+    ``meta`` carries the machine-readable context (expert / round / mode) **out
+    of band**: it feeds the cache key and the fake adapter, and never enters the
+    message content (design §12 1f). Keeping it out of the prompt is what makes
+    two rounds over an unchanged baseline render byte-identical prompts — see
+    ``contracts.LLMCallMeta``. Callers with no such context to report (the
+    LlamaIndex bridge) may omit it.
     """
 
-    async def complete(self, *, purpose: str, system: str, user: str) -> LLMResult: ...
+    async def complete(
+        self, *, purpose: str, system: str, user: str, meta: LLMCallMeta | None = None
+    ) -> LLMResult: ...
 
 
 @runtime_checkable
