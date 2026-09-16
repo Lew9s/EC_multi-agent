@@ -178,7 +178,7 @@ async def _run_one(task: ExpertTask, ctx: _RunContext, allowed: Sequence[str]) -
     """
     try:
         async with asyncio.timeout(task.budget.timeout_s):
-            return await run_expert(task, ctx.llm, allowed)
+            return await run_expert(task, ctx.llm, allowed, events=ctx.events)
     except asyncio.CancelledError:
         raise
     except (InvariantViolation, BudgetExceeded, StepLimitExceeded):
