@@ -38,9 +38,9 @@ from ..contracts import (
 )
 from ..errors import BudgetExceeded, InvariantViolation, StepLimitExceeded
 from ..ports import RunContext
-from .experts import abstain_opinion, run_expert
 from .guard import Guard, LoopState
 from .memory import MemoryService
+from .skills.expert_review import abstain_opinion, run_expert
 
 
 @dataclass(frozen=True)
@@ -90,6 +90,7 @@ class MetaLoopResult:
     warnings: list[str] = field(default_factory=list)
     rounds: int = 0
     active: list[str] = field(default_factory=list)
+    weights: dict[str, float] = field(default_factory=dict)
     plans: list[object] = field(default_factory=list)
     steps: list[StepRecord] = field(default_factory=list)
 
@@ -393,6 +394,7 @@ class AgentRuntime:
         result.status = status
         result.usage = state.usage
         result.active = list(state.active)
+        result.weights = dict(state.weights)
         result.plans = list(state.plans)
         result.steps = self.steps
         return result

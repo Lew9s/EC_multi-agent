@@ -77,6 +77,7 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 | `agents/runtime.py` | `AgentRuntime`：元/子智能体**共用**的 think-act-observe 执行入口；`StepRecord` 逐 step 落盘 |
 | `agents/guard.py` | 守卫：六个 act 的逐条判据，全局状态的**唯一写者**（扩基线 / `freeze` / `register` / 投影 / 额度） |
 | `agents/meta.py` | 元智能体的**决策部分**（当前是规则骨架）+ `ActivationPlan` 的生产者 |
+| `agents/skills/` | **技能包**（目录形式）：`expert_review/` 带 `SKILL.md` + prompt/personas/runner，六个专家复用同一技能，差别只在 persona |
 | `workflow.py` | 外环：前段准备（意图 / 检索 / 落地等级）→ 调用元智能体循环 → 后段收尾（渲染 / 保证等级 / 振荡记录） |
 | `interface/cli.py` | 对话式命令行 |
 
@@ -113,6 +114,9 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **act 是请求，守卫是唯一写者**：扩基线 / `freeze()` / `register()` / 写 `ProjectionRecord` / 扣额度只发生在 `agents/guard.py`；元智能体只能提交提案（D-71）
 - **逐 step 可回放**：每次 think / act / guard / llm 都**在执行前**落一条 `step`、执行后落 `step_done`（§9.4 的 `StepRecord`，kernel 的前置 seam）
 - **分发通道零自由文本**：`dispatch_experts` 的载荷键是闭集，多一个键就整单作废（D-75）
+- **专家评审是可复用技能**：方法（评审准则 + 契约 + 重试/修复/弃权）在 `agents/skills/expert_review/`，六个专家只是同一技能 + 不同 persona（D-92）
+- **判断可以基于领域通识**：本轮证据给不出技术细节时专家仍须给判断（revise/reject + 待补清单），`abstain` 只留给「超出专业范围 / 请求无法判定」（D-92）
+- **保证等级看实际依据**：每条意见声明 `basis`（evidence / knowledge / mixed），声明 knowledge 的权重占比 > 0.5 时保证等级降为 `knowledge_based`——检索命中历史 ≠ 专家用了它
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）
 - **记忆读权限在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影
