@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from .contracts import (
     AgentBudget,
-    Claim,
+    AnonymizedClaim,
     CrossAgentInfo,
     DisclosurePolicy,
     Evidence,
@@ -123,7 +123,7 @@ class MemorySlice:
     """A read-only view of global memory. Kept shaped like a future tool."""
 
     baseline_ids: tuple[str, ...]
-    conflicts: tuple[Claim, ...]
+    conflicts: tuple[AnonymizedClaim, ...]
     hard_constraints: tuple[str, ...]
 
 
@@ -134,10 +134,20 @@ def collect_hard_constraints(opinions: Iterable[ExpertOpinion]) -> list[str]:
 
 def collect_claims(
     opinions: Iterable[ExpertOpinion], *, exclude: str | None = None
-) -> list[Claim]:
-    """Cross-agent claims, deterministic order, verbatim text."""
-    claims = [c for op in opinions for c in op.claims if op.expert != exclude]
-    return sorted(claims, key=lambda c: (c.discipline, c.claim))
+) -> list[AnonymizedClaim]:
+    """Cross-agent claims: deterministic order, verbatim text, **no identity**.
+
+    Returns ``AnonymizedClaim`` rather than ``Claim`` so that "a peer's
+    discipline never crosses the boundary" is a property of the type, not of
+    how carefully a renderer is written (D-77).
+    """
+    claims = [
+        AnonymizedClaim.from_claim(c)
+        for op in opinions
+        for c in op.claims
+        if op.expert != exclude
+    ]
+    return sorted(claims, key=lambda c: (c.claim, c.condition or ""))
 
 
 class MemoryService:

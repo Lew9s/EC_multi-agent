@@ -242,9 +242,12 @@ def parse_opinion(expert: str, raw: str, allowed_ids: Sequence[str]) -> ExpertOp
             f"引用了本轮未检索到的证据: {unknown[:3]}", node=expert
         )
 
-    # 剔除引用了越界证据的 claim，其余保留
+    # 剔除引用了越界证据的 claim，其余保留；同时用**实际专家身份**覆盖模型自报的
+    # discipline。与上面覆盖 expert 是同一个理由：claim 的专业归属是研究数据
+    # （§8.5.6 的披露图），不能由被测量的对象自己填写，否则它可以冒用他人的身份
+    # 制造一条「某专业提出」的论据。
     opinion.claims = [
-        Claim.model_validate(c.model_dump())
+        Claim.model_validate({**c.model_dump(), "discipline": expert})
         for c in opinion.claims
         if all(eid in allowed for eid in c.evidence_ids)
     ]

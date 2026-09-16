@@ -1009,11 +1009,19 @@ class RunResult(BaseModel):
 ### 6.6 跨 Agent 投影类
 
 ```python
-class Claim(BaseModel):                  # 跨 agent 传播的最小单位
-    claim: str = Field(max_length=200)   # 短句，防注入；原样复制不改写
-    condition: str | None = None         # 条件不可省
+class Claim(BaseModel):                  # run 内的事实载体（含身份，不进投影）
+    claim: ClaimText                     # 单行、≤200；原样复制不改写（D-77）
+    condition: SingleLineText | None     # 单行、≤200；空串视为「无条件」
     evidence_ids: list[str] = Field(min_length=1)
-    discipline: str                      # 来源领域（投影时用于过滤自己）
+    discipline: str                      # 来源专业：run 内的研究数据（§8.5.6），由代码按实际发言人覆写
+
+class AnonymizedClaim(BaseModel):        # 跨 agent 边界时的形态（D-77）
+    claim: ClaimText
+    condition: SingleLineText | None
+    evidence_ids: list[str] = Field(min_length=1)
+    # 故意没有 discipline：E01..E06 与专家身份一一对应，携带它即身份披露
+    # （D-50 / §8.4.5）。**字段集合本身就是保证**——往 Claim 加字段不会自动扩宽
+    # 边界；有一条测试钉住这个字段集。
 
 class DisclosurePolicy(str, Enum):
     NONE = "none"                        # 首轮：完全隔离
@@ -1025,7 +1033,7 @@ class DisclosurePolicy(str, Enum):
         return cls.NONE if round == 0 else cls.ANONYMOUS_CLAIMS
 
 class CrossAgentInfo(BaseModel):
-    anonymous_claims: list[Claim] = []   # 字段选择，原样复制；构造时即抹去 discipline
+    anonymous_claims: list[AnonymizedClaim] = []   # 类型即边界：无 discipline
     hard_constraints: list[str] = []     # 不可被 Filter 丢弃；已限长、单行化
     consensus_score: float = 0.0
     dissent_count: int = 0
