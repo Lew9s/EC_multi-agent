@@ -77,11 +77,16 @@ def test_abstaining_cannot_inflate_consensus() -> None:
 
 
 def test_quorum_below_min_effective_forces_manual_review() -> None:
+    """D-93：quorum 拦的是**缺席**（执行失败弃权），不是「判断性弃权」。
+
+    本用例此前用裸 `decision="abstain"` 表达缺席——那正是被修正的混淆：判断性弃权是一次
+    **交付**（专家说「我判断：无法结论」），只有服务端兜底的弃权才算缺席。
+    """
     weights = {"E01": 1.0, "E02": 1.0, "E03": 1.0}
     opinions = {
         "E01": opinion("E01", "approve"),
-        "E02": opinion("E02", "abstain"),
-        "E03": opinion("E03", "abstain"),
+        "E02": abstain_opinion("E02", [EID], "调用超时"),
+        "E03": abstain_opinion("E03", [EID], "传输失败"),
     }
     _, effective, status = consensus(opinions, weights, 0.6, min_effective=3)
     assert effective == 1

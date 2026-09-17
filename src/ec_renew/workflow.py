@@ -38,6 +38,7 @@ from .contracts import (
     EntityRef,
     EvidenceBundle,
     EvidenceMeta,
+    EvidenceRequest,
     ExpertOpinion,
     GraphExpansion,
     Grounding,
@@ -189,9 +190,21 @@ def consensus(
     An abstaining expert contributes 0 to the numerator but keeps its weight in
     the denominator, so abstaining can only *lower* the score.
     """
-    effective = sum(1 for op in opinions.values() if op.decision != "abstain")
+    # 「有效专家」= **交付了意见**的专家（D-93）。弃权是一次交付（它是一条完整的、带证据的
+    # 判断），只有**执行失败**才是缺席。D-37 的原意是「避免缺席被当作通过」，此前却把「缺席」
+    # 等同于了 `abstain` 这个值——于是「四位专家一致说证据不足」被读成「四位专家缺席」。
+    delivered = {
+        expert: op for expert, op in opinions.items() if op.abstain_kind != "execution_failure"
+    }
+    effective = len(delivered)
     if effective < min_effective:
         return 0.0, effective, "manual_review"
+
+    # 全员判断性弃权不是「专家分歧未解决」，而是**证据缺口**：补救动作是补证据，不是再投票
+    # （D-93；与 D-82 把 stalled 独立出来同源）。它不满足「迭代能带来新信息」的前提，因此
+    # 直接收束，并在 `evidence_requests` 里交出缺口清单。
+    if delivered and all(op.decision == "abstain" for op in delivered.values()):
+        return 0.0, effective, "insufficient_evidence"
 
     numerator = sum(
         weights.get(expert, 0.0) * DECISION_SCORES[op.decision]
@@ -346,6 +359,7 @@ def render_markdown(
     rounds: int,
     evidence_gists: dict[str, str],
     oscillation: Mapping[str, int] | None = None,
+    evidence_requests: Sequence[EvidenceRequest] = (),
 ) -> str:
     lines = [
         "# 工程变更方案",
@@ -383,6 +397,17 @@ def render_markdown(
         lines.append("")
         for eid in sorted(evidence_gists):
             lines.append(f"- `{eid}`：{evidence_gists[eid]}")
+        lines.append("")
+
+    if evidence_requests:
+        # 缺口清单第一次进入**结构化契约**（RunResult.evidence_requests），报告里也要看得见：
+        # 「缺什么」是这次评审最可执行的产出，不该只沉在 uncertainties 的散文里（D-94）。
+        lines.append("## 需要补充的证据")
+        lines.append("")
+        for gap in evidence_requests:
+            lines.append(f"- [{gap.scope}] {gap.query}")
+        lines.append("")
+        lines.append("（检索端 `RetrieverPort.search()` 尚未实现：以上请求已登记，落地后即刻生效。）")
         lines.append("")
     return "\n".join(lines)
 
@@ -499,6 +524,8 @@ async def run(
         sub_questions=intent.sub_questions,
         max_rounds=max_rounds,
         consensus_fn=partial(consensus, threshold=threshold, min_effective=min_effective),
+        # 证据缺口由专家写好的待补清单确定性派生（D-94），在 observe 阶段经 act 通道提交。
+        gap_fn=partial(skeleton.gaps, request=intent.normalized_request),
         stall_fn=detect_stall,
     )
     warnings.extend(loop.warnings)
@@ -545,6 +572,7 @@ async def run(
         rounds=loop.rounds,
         evidence_gists=evidence_gists,
         oscillation=stall.reversals,
+        evidence_requests=loop.evidence_requests,
     )
 
     # 保证等级必须反映**专家实际用的依据**，而不只是「检索有没有命中」。真实 run 里出现过
@@ -553,10 +581,19 @@ async def run(
     # 即降级，并在 inference_basis 里写明原因。
     knowledge_share = _knowledge_share(loop.latest, loop.weights)
     downgraded = grounding.has_history and knowledge_share > 0.5
-    level = "knowledge_based" if (not grounding.has_history or downgraded) else "history_backed"
+    # 本轮没有任何专业判断（专家一致判断证据不足）时**不得**声称 history_backed：检索命中了
+    # 历史案例，但没有人用它作出结论（D-93 的连带要求，与 basis 降级同一理由）。
+    gap_only = loop.status == "insufficient_evidence"
+    level = (
+        "knowledge_based"
+        if (not grounding.has_history or downgraded or gap_only)
+        else "history_backed"
+    )
     inference_basis: list[str] = []
     if not grounding.has_history:
         inference_basis = [grounding.note]
+    elif gap_only:
+        inference_basis = ["本轮无任何专业判断（专家一致判断证据不足）：不得声称 history_backed"]
     elif downgraded:
         reason = (
             f"{knowledge_share:.0%} 的权重来自声明 basis=knowledge 的专家："
@@ -585,6 +622,7 @@ async def run(
         consensus_score=loop.score,
         consensus_status=loop.status,  # type: ignore[arg-type]
         stall=stall,
+        evidence_requests=loop.evidence_requests,
         grounding=grounding,
         assurance=assurance,
         usage=loop.usage,

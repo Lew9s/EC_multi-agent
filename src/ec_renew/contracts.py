@@ -431,6 +431,14 @@ class ExpertOpinion(BaseModel):
     #: 通识给出判断（见技能 ``agents/skills/expert_review/SKILL.md``），但那样的判断不该冒充
     #: ``history_backed``。缺省 ``evidence`` 是为了与既有假适配器/夹具保持兼容。
     basis: Literal["evidence", "knowledge", "mixed"] = "evidence"
+    #: 弃权的**来源**，由服务端在构造点赋值，模型无法设置（D-93）：
+    #:
+    #: * ``judgment`` —— 模型在契约内弃权：「本请求我无法给出结论」。这是一次**交付**。
+    #: * ``execution_failure`` —— 服务端兜底（超时 / 传输错误 / 契约重试耗尽）。这才是**缺席**。
+    #:
+    #: 区分它们的理由：两者交给人时的补救动作相反（补证据 vs 重试/换模型），而 quorum 只该拦
+    #: 后者——D-37 的原意是「避免缺席被当作通过」，不是「弃权即缺席」。
+    abstain_kind: Literal["judgment", "execution_failure"] | None = None
     rationale: str = Field(default="", max_length=MAX_RATIONALE_CHARS)
     evidence_ids: list[str] = Field(min_length=1)
     claims: list[Claim] = Field(default_factory=list)
@@ -599,8 +607,17 @@ class RunResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     active_experts: list[str] = Field(default_factory=list)
     consensus_score: float = 0.0
-    consensus_status: Literal["approved", "manual_review", "stalled"] = "manual_review"
+    #: 收敛状态（D-82 / D-93）。四个取值的补救动作**互不相同**，混用会错配：
+    #: ``approved`` 交付方案；``manual_review`` 专家仍有分歧 → 人工裁定；
+    #: ``stalled`` 流程已无信息增益（不动点）；``insufficient_evidence`` 专家**一致判断证据
+    #: 不足** → 补证据（带结构化缺口清单），不是再投票。
+    consensus_status: Literal[
+        "approved", "manual_review", "stalled", "insufficient_evidence"
+    ] = "manual_review"
     stall: StallReport = Field(default_factory=StallReport)
+    #: 结构化的证据缺口清单（D-94）。此前「缺什么」只沉在渲染文本里，机器消费者拿不到；
+    #: 现在它是契约的一部分：每条都可直接喂给检索端（``RetrieverPort.search()`` 落地后即刻生效）。
+    evidence_requests: list[EvidenceRequest] = Field(default_factory=list)
     grounding: Grounding = Field(default_factory=Grounding)
     assurance: AssuranceLevel = Field(default_factory=AssuranceLevel)
     usage: Usage = Field(default_factory=Usage)

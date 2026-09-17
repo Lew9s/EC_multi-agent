@@ -20,12 +20,33 @@ from ..contracts import (
     EXPERT_IDS,
     ActionProposal,
     ActivationPlan,
+    EvidenceRequest,
     MemoryView,
 )
 from .experts import select_experts
 from .guard import LoopState
 
 UNIFORM_WEIGHT = 1.0
+
+#: 证据缺口的**词表 → scope** 映射（D-94）。固定词表让「缺什么 → 查什么」可复现、可评审：
+#: 命中的词会被拼进 query，而模型原文（``uncertainties``）**永远不进** query。
+GAP_SCOPE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "standards",
+        ("规范", "标准", "船级社", "船检", "证书", "认可",
+         "wps", "pqr", "探伤", "ndt", "验收", "检验"),
+    ),
+    ("cases", ("同类", "历史", "类似", "先例", "案例", "以往")),
+    (
+        "components",
+        ("板厚", "材质", "规格", "钢级", "图纸", "图号", "补强", "强度", "疲劳", "肋位", "开孔"),
+    ),
+    ("departments", ("部门", "签收", "船东", "设计公司")),
+)
+
+#: 每轮最多提几条请求、每条最多带几个关键词（防空转；Q-04 的检索配额留给检索端落地时定）。
+MAX_GAP_REQUESTS = 2
+MAX_GAP_KEYWORDS = 4
 
 
 def plan_payload(plan: ActivationPlan) -> dict[str, object]:
@@ -39,6 +60,21 @@ def plan_payload(plan: ActivationPlan) -> dict[str, object]:
         "weights": dict(plan.weights),
         "evidence_scope": {k: list(v) for k, v in plan.evidence_scope.items()},
         "cross_domain_flags": list(plan.cross_domain_flags),
+    }
+
+
+def gap_payload(gap: EvidenceRequest) -> dict[str, object]:
+    """把缺口转成 act 载荷：**只含 ``request_evidence`` 允许的键**（D-90）。
+
+    ``EvidenceRequest`` 自带 ``expert`` 字段，而 act 载荷键是**闭集**——多一个键整单作废。
+    守卫拒收是对的（闭集闸门正是在防「没申报的键混进管道」），所以由生产者裁掉它，
+    而不是为了通过而放宽守卫。
+    """
+    return {
+        "query": gap.query,
+        "reason": gap.reason,
+        "scope": gap.scope,
+        "effective_round": gap.effective_round,
     }
 
 
@@ -99,19 +135,6 @@ class RuleSkeleton:
                     action="attribute", payload={}, rationale="先归因上一轮分歧（§5.2.6）"
                 )
             )
-            if self._evidence_gap(state):
-                proposals.append(
-                    ActionProposal(
-                        action="request_evidence",
-                        payload={
-                            "query": request,
-                            "reason": "上一轮分歧源于证据不同（重叠度 < 1）",
-                            "scope": "cases",
-                            "effective_round": state.round_no + 1,
-                        },
-                        rationale="缺同类案例证据；只在下一轮生效（D-16）",
-                    )
-                )
             # L4 不常驻（D-74）：轮次折叠明细按需经 read_memory 取，并计入每轮额度。
             proposals.append(
                 ActionProposal(
@@ -137,10 +160,43 @@ class RuleSkeleton:
         )
         return proposals
 
-    @staticmethod
-    def _evidence_gap(state: LoopState) -> bool:
-        """上一轮归因结论是「证据不同」→ 提证据请求（Q-22：归因只记录，不改控制流）。"""
-        return bool(state.attributions) and state.attributions[-1].kind == "evidence"
+    def gaps(self, state: LoopState, *, request: str) -> list[EvidenceRequest]:
+        """由专家**已经写好的待补清单**派生证据请求（D-94：确定性、词表驱动）。
+
+        为什么不用「归因结论 = 证据不同」当触发信号：全员弃权时**根本没有分歧可归因**，那条路
+        在实践中不可达（真实 run 实测确认）。而「缺什么」就写在专家的 ``uncertainties`` 与
+        ``constraints`` 里——那是最可执行的信号，此前却只沉在渲染文本里。
+
+        两条纪律：
+
+        * ``query`` 由**固定词表 + 原始请求**拼成，**绝不把 ``uncertainties`` 原文当检索输入**：
+          那等于让模型文本驱动检索 → 检索结果进下一轮事实基线，与 D-71「概率组件不直接写事实」
+          同一精神；用词表拼接则检索行为**可复现**。
+        * 只在**已知缺口**上提请求：命中词为空就不提，宁缺勿滥。
+        """
+        text = " ".join(
+            [item for op in state.latest.values() for item in op.uncertainties]
+            + [item for op in state.latest.values() for item in op.constraints]
+        ).lower()
+        if not text:
+            return []
+
+        requests: list[EvidenceRequest] = []
+        for scope, words in GAP_SCOPE_KEYWORDS:
+            hits = [word for word in words if word in text][:MAX_GAP_KEYWORDS]
+            if not hits:
+                continue
+            requests.append(
+                EvidenceRequest(
+                    query=f"{request}｜需补充：{'、'.join(hits)}",
+                    reason=f"专家在 uncertainties/constraints 中声明缺少：{'、'.join(hits)}",
+                    scope=scope,  # type: ignore[arg-type]
+                    effective_round=state.round_no + 1,
+                )
+            )
+            if len(requests) >= MAX_GAP_REQUESTS:
+                break
+        return requests
 
     def closing(self, approved: bool, stalled: bool) -> ActionProposal:
         """收束提案（§5.4.1）：达标/停滞 → finalize；未达共识 → ask_human。"""
