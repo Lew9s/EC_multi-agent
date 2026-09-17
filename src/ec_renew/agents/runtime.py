@@ -87,6 +87,9 @@ class MetaLoopResult:
     score: float = 0.0
     effective: int = 0
     status: str = "retry"
+    #: 「交人」的原因（D-96）。与 ``status`` 一样由外环注入的裁定函数给出；只有
+    #: ``status == "manual_review"`` 时才有值，交付与停滞不带原因标签。
+    review_reason: str | None = None
     stall: StallReport = field(default_factory=StallReport)
     usage: Usage = field(default_factory=Usage)
     warnings: list[str] = field(default_factory=list)
@@ -289,6 +292,7 @@ class AgentRuntime:
             [dict[str, ExpertOpinion], dict[str, ExpertOpinion], Sequence[str], Sequence[str]], bool
         ],
         gap_fn: Callable[[LoopState], list[EvidenceRequest]] | None = None,
+        reason_fn: Callable[[dict[str, ExpertOpinion]], str] | None = None,
     ) -> MetaLoopResult:
         """一个评审轮 = 一次 think-act-observe；``max_rounds`` 就是轮次上限本身，
         不引入第二套「元智能体步数上限」（§5.4.1）。"""
@@ -299,6 +303,7 @@ class AgentRuntime:
         result = MetaLoopResult()
         previous: dict[str, ExpertOpinion] = {}
         previous_baseline: list[str] = []
+        dispatch_rejected = False
 
         for round_no in range(1, max_rounds + 1):
             state.round_no = round_no
@@ -328,6 +333,7 @@ class AgentRuntime:
                 # 守卫整单作废（§12 1c）：本轮没有意见可评，显式交人工而不是静默继续。
                 result.warnings.append(f"dispatch_rejected:{verdict.reason}")
                 result.status = "manual_review"
+                dispatch_rejected = True
                 break
 
             # --- observe（裁定权在外环：回调注入） ------------------------ #
@@ -354,7 +360,7 @@ class AgentRuntime:
 
             # --- 证据缺口（D-94）：在 observe 阶段、**收束之前**提交 ---------- #
             # 放在这里而不是下一轮的 think 里，是因为「全员判断性弃权」这一情形本轮就会收束
-            # （status=insufficient_evidence）——若等到下一轮再提，缺口永远交不出去。
+            # （终态 `manual_review`，原因 `evidence_gap`）——若等到下一轮再提，缺口永远交不出去。
             # 缺口仍走 act 通道（`request_evidence`）：守卫的判据、记账与事件一条都不变。
             if gap_fn is not None:
                 for gap in gap_fn(state):
@@ -394,10 +400,18 @@ class AgentRuntime:
 
         if status == "retry":
             # 轮次耗尽仍未收敛：**终态由外环的裁定函数给出**（D-73：裁定权在外环），不再硬编码
-            # manual_review。有人明确反对 → manual_review（分歧未决）；无人反对 → conditional
-            # （一致认为方向可行、需先满足条件）。见 D-95 的两层判定。
+            # manual_review。D-96 之后第 2 层只有交付/交人两个出口，「因为什么交人」由下面的
+            # `reason_fn` 单独判定。
             _, _, status = consensus_fn(state.latest, state.weights, final=True)
             result.warnings.append("max_rounds_reached")
+
+        # --- 交人的原因（D-96）--------------------------------------------- #
+        # 与共识/停滞判定同样是**裁定**，所以同样由外环注入（D-73）：内环不 import `workflow`。
+        # 派发被守卫整单作废时不给原因标签：本轮压根没有意见可评，`state.latest` 还可能留着上一
+        # 轮的旧意见，据此判原因是在描述另一轮；真正的原因在 `warnings` 的
+        # `dispatch_rejected:...` 里，硬套一个标签只会误导接手的人。
+        if status == "manual_review" and reason_fn is not None and not dispatch_rejected:
+            result.review_reason = reason_fn(state.latest)
 
         # --- 收束 act：达标/停滞 → finalize，未达共识 → ask_human（§5.4.1） --- #
         state.round_no = result.rounds

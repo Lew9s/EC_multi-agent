@@ -426,7 +426,6 @@ def test_a_run_reports_the_guarded_acts() -> None:
     assert all(v["verdict"] in {"accept", "correct", "reject"} for v in verdicts)
     assert result.consensus_status in {
         "approved",
-        "conditional",
         "manual_review",
         "stalled",
     }

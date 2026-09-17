@@ -1,10 +1,11 @@
-"""D-93 / D-94：弃权的两种来源、`insufficient_evidence` 状态、以及证据缺口派生。
+"""D-93 / D-94 / **D-96**：弃权的两种来源、证据缺口、以及「交人原因」。
 
 这个文件钉住四件事：
 
 1. **判断性弃权是一次交付**（算「有效专家」），只有执行失败才是缺席 —— quorum 只该拦后者；
 2. 弃权来源由**服务端**判定，模型无法把自己伪装成缺席或反之；
-3. 全员判断性弃权 → `insufficient_evidence`，且 `assurance` **不得**声称 `history_backed`；
+3. 全员判断性弃权 → `manual_review` + `review_reason="evidence_gap"`（D-96 之前是独立状态
+   `insufficient_evidence`），且 `assurance` **不得**声称 `history_backed`；
 4. 证据缺口由专家写好的待补清单**确定性派生**，模型原文永不进 query。
 """
 
@@ -31,7 +32,7 @@ from ec_renew.llm import FakeLLM
 from ec_renew.observability import NullEventLog
 from ec_renew.ports import RunContext
 from ec_renew.rag import InMemoryRetriever
-from ec_renew.workflow import consensus, run
+from ec_renew.workflow import consensus, manual_review_reason, run
 
 EID = "E-9c4b1e7a2f03"
 REQUEST = "301分段FR36污水井更换加厚板，涉及焊接，需确认合规性"
@@ -61,7 +62,9 @@ def test_judgment_abstain_is_a_delivery_not_an_absence() -> None:
 
     assert effective == 4, "判断性弃权必须计入「已交付」"
     assert score == 0.0
-    assert status == "insufficient_evidence"
+    # 终态是「交人」，原因才是「证据缺口」——D-96 把这两件事拆开了（此前是独立状态值）。
+    assert status == "manual_review"
+    assert manual_review_reason(opinions, min_effective=3) == "evidence_gap"
 
 
 def test_execution_failure_abstain_is_still_an_absence() -> None:
@@ -82,7 +85,7 @@ def test_execution_failure_abstain_is_still_an_absence() -> None:
     assert status == "manual_review"
 
 
-def test_a_mixed_round_is_not_insufficient_evidence() -> None:
+def test_a_mixed_round_is_not_an_evidence_gap() -> None:
     """有人给了判断 → 走原来的路（按分数判），不是证据缺口。"""
     weights = {expert: 1 / 3 for expert in EXPERT_IDS[:3]}
     opinions = {
@@ -226,7 +229,8 @@ class _AbstainingLLM:
 
 
 def test_an_all_abstain_run_reports_the_gap_instead_of_absent_experts() -> None:
-    """真实 run 的故障形态：以前报 `manual_review`（像专家缺席），现在报证据缺口 + 缺口清单。"""
+    """真实 run 的故障形态：以前报 `manual_review`（像专家缺席），现在终态仍是 `manual_review`
+    但**原因**是证据缺口，并且交出缺口清单（D-93 的分类 + D-96 的原因标签）。"""
     ctx = RunContext(
         run_id="all-abstain",
         llm=_AbstainingLLM(),  # type: ignore[arg-type]
@@ -237,7 +241,8 @@ def test_an_all_abstain_run_reports_the_gap_instead_of_absent_experts() -> None:
 
     result = asyncio.run(run(RunInput(request=REQUEST), ctx))
 
-    assert result.consensus_status == "insufficient_evidence"
+    assert result.consensus_status == "manual_review"
+    assert result.review_reason == "evidence_gap"
     assert result.rounds == 1, "证据缺口不该硬迭代（D-29 / §5.5.5）"
     assert "max_rounds_reached" not in result.warnings
     assert result.evidence_requests, "缺口必须交出去（结构化契约，不只是渲染文本）"
