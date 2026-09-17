@@ -26,7 +26,7 @@ from functools import partial
 
 from .agents.experts import select_experts
 from .agents.guard import Guard
-from .agents.memory import MemoryService
+from .agents.memory import MemoryService, collect_hard_constraints
 from .agents.meta import RuleSkeleton
 from .agents.runtime import META_SPEC, AgentRuntime
 from .config import settings as default_settings
@@ -44,6 +44,7 @@ from .contracts import (
     Grounding,
     HumanReviewRequest,
     IntentCompletion,
+    ReviewReason,
     RunInput,
     RunResult,
     SubQuestion,
@@ -184,11 +185,24 @@ def consensus(
     weights: dict[str, float],
     threshold: float,
     min_effective: int,
+    *,
+    final: bool = False,
 ) -> tuple[float, int, str]:
-    """Denominator is the configured weight sum (D-38).
+    """共识判定（D-38 / D-93 / D-95 / **D-96**）。分两层，**不要混用**：
 
-    An abstaining expert contributes 0 to the numerator but keeps its weight in
-    the denominator, so abstaining can only *lower* the score.
+    1. **是否收敛**（决定要不要继续迭代）——结构化规则，不是分数：
+       `无 reject、且至少一位 approve、且支持度 ≥ threshold` → `approved`。
+    2. **停止时如何分类**（决定交付还是交人）——只有两个出口：`approved`（交付）与
+       `manual_review`（交人）。「因为什么交人」**不是状态取值的事**，而是
+       :func:`manual_review_reason` 的事（D-96）。
+
+    为什么把分数从**判据**降为**描述性支持度**（D-95）：`score = 0.5 + (a − j − x)/2` 里
+    `revise` 被完全消掉，于是「全员一致附条件」与「赞反对峙」算出**同一个 0.5000**——一个无法
+    区分这两种局面的数字不该拥有裁定权。分数照旧计算并报告（它仍表达「明确支持的强度」，用于
+    区分「明确通过」与「交人」），但它不再决定「交给人还是交付」。
+
+    另两条不变：分母是**配置权重和**（D-38，弃权计 0 分故只能压低分数）；`final=False` 时
+    未收敛一律返回 `retry`（循环继续），终态由外环在轮次结束时以 `final=True` 取得。
     """
     # 「有效专家」= **交付了意见**的专家（D-93）。弃权是一次交付（它是一条完整的、带证据的
     # 判断），只有**执行失败**才是缺席。D-37 的原意是「避免缺席被当作通过」，此前却把「缺席」
@@ -201,10 +215,11 @@ def consensus(
         return 0.0, effective, "manual_review"
 
     # 全员判断性弃权不是「专家分歧未解决」，而是**证据缺口**：补救动作是补证据，不是再投票
-    # （D-93；与 D-82 把 stalled 独立出来同源）。它不满足「迭代能带来新信息」的前提，因此
-    # 直接收束，并在 `evidence_requests` 里交出缺口清单。
+    # （D-93）。它是**当轮收束**（即使 `final=False` 也返回非 `retry`）：它不满足「迭代能带来
+    # 新信息」的前提，继续迭代只会产生共识幻觉（D-29 / §5.5.5），缺口清单在
+    # `evidence_requests` 里交出。收束后的原因标签由 `manual_review_reason` 判为 `evidence_gap`。
     if delivered and all(op.decision == "abstain" for op in delivered.values()):
-        return 0.0, effective, "insufficient_evidence"
+        return 0.0, effective, "manual_review"
 
     numerator = sum(
         weights.get(expert, 0.0) * DECISION_SCORES[op.decision]
@@ -212,7 +227,57 @@ def consensus(
     )
     denominator = sum(weights.get(expert, 0.0) for expert in weights)
     score = round(numerator / denominator, 4) if denominator else 0.0
-    return score, effective, "approved" if score >= threshold else "retry"
+
+    # --- 第 1 层：是否收敛（决定要不要继续迭代） -------------------------- #
+    has_reject = any(op.decision == "reject" for op in delivered.values())
+    has_approve = any(op.decision == "approve" for op in delivered.values())
+    if not has_reject and has_approve and score >= threshold:
+        return score, effective, "approved"
+    if not final:
+        return score, effective, "retry"
+
+    # --- 第 2 层：停止时的分类（决定交给人还是交付） ---------------------- #
+    # 唯一的另一个出口就是交人；**「为什么」由 reason 回答，不在这里分叉**（D-96）。曾经这里按
+    # 「有 reject / 无 reject」分成 `manual_review` 与 `conditional`，但那个区分没有对应的行为差
+    # ——收束 act 一直是 `closing(status=="approved", status=="stalled")`，`conditional` 从未因此
+    # 自动交付，它实际也在问人。状态值与实际行为不一致，且多出一个消费者必须分支的取值。
+    return score, effective, "manual_review"
+
+
+def manual_review_reason(
+    opinions: dict[str, ExpertOpinion], min_effective: int
+) -> ReviewReason:
+    """`manual_review` 的**原因**（D-96）——「交给人时该说的那句话」，机器可读。
+
+    判定顺序与 :func:`consensus` 的收束顺序**逐一对应**，所以每个 `manual_review` 恰好得到一条
+    原因：缺席（有效专家不足）→ 证据缺口（全员判断性弃权）→ 分歧（有人明确反对）→ 其余
+    （无人反对、但支持度不足以自动交付，多为全员附条件）。
+
+    为什么「缺席」也值得一个标签：D-37 只规定了「缺席不得被当作通过」，从未给它一个状态取值，
+    于是「有人没交出意见」与「专家分歧未决」在契约里长得一模一样。既然这个字段是交人记录的一
+    部分，就不能对它撒谎——把缺席说成 `conditions_only`（读起来像「条件都谈妥了」）会误导接手
+    的人。这是把状态值并掉之后**新增**的一条信息，不是搬走的那两条。
+    """
+    delivered = {
+        expert: op for expert, op in opinions.items() if op.abstain_kind != "execution_failure"
+    }
+    if len(delivered) < min_effective:
+        return "quorum"
+    if delivered and all(op.decision == "abstain" for op in delivered.values()):
+        return "evidence_gap"
+    if any(op.decision == "reject" for op in delivered.values()):
+        return "disagreement"
+    return "conditions_only"
+
+
+#: 原因标签 → 交给人的那句话（报告用）。放在这里而不是渲染函数里，是为了让「原因」这件事只有
+#: 一个定义处：契约的取值、判定的函数、报告的措辞三者一一对应。
+REVIEW_REASON_LABELS: dict[ReviewReason, str] = {
+    "quorum": "交付意见不足（有专家未交出意见）——不是分歧，是缺席，需查清原因后重跑或补评审",
+    "disagreement": "存在明确反对（reject）——分歧未决，需人工裁定",
+    "conditions_only": "无人明确反对，但支持度不足以自动交付——附条件方案需人工确认",
+    "evidence_gap": "专家一致判断证据不足——需先补齐证据再评审",
+}
 
 
 def _knowledge_share(opinions: dict[str, ExpertOpinion], weights: dict[str, float]) -> float:
@@ -360,16 +425,22 @@ def render_markdown(
     evidence_gists: dict[str, str],
     oscillation: Mapping[str, int] | None = None,
     evidence_requests: Sequence[EvidenceRequest] = (),
+    conditions: Sequence[str] = (),
+    review_reason: ReviewReason | None = None,
 ) -> str:
     lines = [
         "# 工程变更方案",
         "",
         f"- 请求：{request}",
         f"- 依据等级：{'history_backed' if grounding.has_history else 'knowledge_based'}",
-        f"- 共识分：{score:.2f}（阈值 {threshold:.2f}）",
+        f"- 支持度：{score:.2f}（描述性统计，不单独决定判定：明确通过还需「无反对」）",
         f"- 状态：{status}",
         f"- 轮次：{rounds}",
     ]
+    # 「交人原因」必须出现在报告里（§5.6.1「交给人时要说什么」）：状态值只说「交人」，接手的人
+    # 需要知道**因为什么**交人——专家的分歧、还是证据缺口、还是有人缺席（D-96）。
+    if review_reason is not None:
+        lines.append(f"- 交人原因：{REVIEW_REASON_LABELS[review_reason]}")
     if oscillation:
         # Recorded, so it must be *visible* (P5: no silent behaviour) — and
         # labelled as not affecting the verdict, because nothing acts on it yet.
@@ -390,6 +461,15 @@ def render_markdown(
         if op.uncertainties:
             lines.append("- 不确定：" + "；".join(op.uncertainties))
         lines.append(f"- 引用证据：{', '.join(sorted(op.evidence_ids))}")
+        lines.append("")
+
+    if conditions:
+        # 前置条件是交付物的一部分（D-95）：交付时它是施工前必须满足的条件，交人时它是裁定的
+        # 依据。两种终态都要带——否则「有条件通过」在交付物里会变成「无条件通过」。
+        lines.append("## 前置条件（施工/采购前必须满足）")
+        lines.append("")
+        for item in conditions:
+            lines.append(f"- {item}")
         lines.append("")
 
     if evidence_gists:
@@ -524,6 +604,9 @@ async def run(
         sub_questions=intent.sub_questions,
         max_rounds=max_rounds,
         consensus_fn=partial(consensus, threshold=threshold, min_effective=min_effective),
+        # 「因为什么交人」同样是裁定，因此与共识/停滞一样**由外环注入**（D-73 / D-96）：
+        # 内环只认三个状态值，不 import `workflow`，单向依赖在目录层面保持成立。
+        reason_fn=partial(manual_review_reason, min_effective=min_effective),
         # 证据缺口由专家写好的待补清单确定性派生（D-94），在 observe 阶段经 act 通道提交。
         gap_fn=partial(skeleton.gaps, request=intent.normalized_request),
         stall_fn=detect_stall,
@@ -562,6 +645,9 @@ async def run(
     evidence_gists = {
         ref.evidence_id: ref.gist for ref in ctx.registry.refs(ctx.registry.all_ids())
     }
+    # 前置条件是**交付物的一部分**（D-95）：交付时它是施工前必须满足的条件，交人时它是裁定的
+    # 依据。两种终态都带——否则「有条件通过」在交付物里会变成「无条件通过」。
+    conditions = collect_hard_constraints(loop.latest.values())
     conclusion = render_markdown(
         request=intent.normalized_request,
         grounding=grounding,
@@ -573,6 +659,8 @@ async def run(
         evidence_gists=evidence_gists,
         oscillation=stall.reversals,
         evidence_requests=loop.evidence_requests,
+        conditions=conditions,
+        review_reason=loop.review_reason,
     )
 
     # 保证等级必须反映**专家实际用的依据**，而不只是「检索有没有命中」。真实 run 里出现过
@@ -582,8 +670,9 @@ async def run(
     knowledge_share = _knowledge_share(loop.latest, loop.weights)
     downgraded = grounding.has_history and knowledge_share > 0.5
     # 本轮没有任何专业判断（专家一致判断证据不足）时**不得**声称 history_backed：检索命中了
-    # 历史案例，但没有人用它作出结论（D-93 的连带要求，与 basis 降级同一理由）。
-    gap_only = loop.status == "insufficient_evidence"
+    # 历史案例，但没有人用它作出结论（D-93 的连带要求，与 basis 降级同一理由）。判据从状态取值
+    # 改成**原因标签**（D-96）——证据缺口如今是 `manual_review` 的一种原因，不再是独立状态。
+    gap_only = loop.review_reason == "evidence_gap"
     level = (
         "knowledge_based"
         if (not grounding.has_history or downgraded or gap_only)
@@ -621,8 +710,10 @@ async def run(
         active_experts=loop.active,
         consensus_score=loop.score,
         consensus_status=loop.status,  # type: ignore[arg-type]
+        review_reason=loop.review_reason,  # type: ignore[arg-type]
         stall=stall,
         evidence_requests=loop.evidence_requests,
+        conditions=conditions,
         grounding=grounding,
         assurance=assurance,
         usage=loop.usage,

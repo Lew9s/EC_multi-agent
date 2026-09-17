@@ -600,6 +600,12 @@ class StallReport(BaseModel):
     reversals: dict[str, int] = Field(default_factory=dict)
 
 
+#: ``manual_review`` 的**原因**（D-96）：状态值只回答「交不交人」，原因回答「交给人时该说什么」。
+#: 两者拆开之后，状态机不必为每种情形各长一个取值——原因由专家意见的**构成**确定性判定
+#: （`workflow.manual_review_reason`），人可以读报告里的「交人原因」行，机器读 `review_reason`。
+ReviewReason = Literal["quorum", "disagreement", "conditions_only", "evidence_gap"]
+
+
 class RunResult(BaseModel):
     request: str
     normalized_request: str
@@ -607,17 +613,24 @@ class RunResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     active_experts: list[str] = Field(default_factory=list)
     consensus_score: float = 0.0
-    #: 收敛状态（D-82 / D-93）。四个取值的补救动作**互不相同**，混用会错配：
-    #: ``approved`` 交付方案；``manual_review`` 专家仍有分歧 → 人工裁定；
-    #: ``stalled`` 流程已无信息增益（不动点）；``insufficient_evidence`` 专家**一致判断证据
-    #: 不足** → 补证据（带结构化缺口清单），不是再投票。
-    consensus_status: Literal[
-        "approved", "manual_review", "stalled", "insufficient_evidence"
-    ] = "manual_review"
+    #: 收敛状态（D-82 / D-93 / D-95 / **D-96**）。三个取值对应**互不相同的补救动作**：
+    #: ``approved`` 交付；``stalled`` 流程已无信息增益（不动点）；``manual_review`` 交人裁定。
+    #: **「交人」内部不再细分状态值**：曾用 ``conditional``（附条件交付）与
+    #: ``insufficient_evidence``（证据不足）区分交人的两种理由，但这两条信息本来就在专家意见里
+    #: （有人反对 / 全部附条件 / 全员弃权），为它们各加一个状态取值只会让每个消费者都多一个
+    #: 必须分支的取值。现在统一由 :data:`ReviewReason` 承载（D-96 推翻 D-93 / D-95 的取值部分）。
+    consensus_status: Literal["approved", "manual_review", "stalled"] = "manual_review"
+    #: 交人的**原因**（D-96），仅在 ``consensus_status == "manual_review"`` 时有值。交付与停滞
+    #: 不是「交人」，所以不带原因标签——`None` 与「原因未知」必须分得开。
+    review_reason: ReviewReason | None = None
     stall: StallReport = Field(default_factory=StallReport)
     #: 结构化的证据缺口清单（D-94）。此前「缺什么」只沉在渲染文本里，机器消费者拿不到；
     #: 现在它是契约的一部分：每条都可直接喂给检索端（``RetrieverPort.search()`` 落地后即刻生效）。
     evidence_requests: list[EvidenceRequest] = Field(default_factory=list)
+    #: 交付物必须携带的**前置条件**（D-95 / D-96）：专家写下的「施工/采购前必须满足什么」，去重
+    #: 排序后的汇总。它们与终态**无关地**跟随交付物——交付时它是交付条件，交人时它是人裁定的
+    #: 依据。若只在某个状态下携带，条件就会在别的状态里消失。
+    conditions: list[str] = Field(default_factory=list)
     grounding: Grounding = Field(default_factory=Grounding)
     assurance: AssuranceLevel = Field(default_factory=AssuranceLevel)
     usage: Usage = Field(default_factory=Usage)

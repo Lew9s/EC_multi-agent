@@ -535,10 +535,16 @@ def test_a_fixed_point_stops_the_loop_and_is_reported_as_stalled() -> None:
 
 def test_a_moving_round_is_not_mistaken_for_a_stall() -> None:
     """Same decisions every round, but the rationale keeps changing — so the
-    next prompt really does differ and this is not a fixed point."""
+    next prompt really does differ and this is not a fixed point.
+
+    终态是「交人 + 附条件」：全员 `revise`、无人反对。D-95 曾把这记成独立状态 `conditional`，
+    D-96 收成 `manual_review` + `review_reason="conditions_only"`——状态值不再分叉，但**原因**
+    仍然说清了「这不是分歧未决，而是四位专家一致认为方向可行、只是各自列出了前置条件」。
+    """
     result = _run_offline(_FixedPointLLM(vary_rationale=True))
 
     assert result.consensus_status == "manual_review"
+    assert result.review_reason == "conditions_only"
     assert result.rounds == 3
     assert result.stall.stalled is False
     assert "max_rounds_reached" in result.warnings

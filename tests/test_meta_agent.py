@@ -424,7 +424,11 @@ def test_a_run_reports_the_guarded_acts() -> None:
     acts = {v["action"] for v in verdicts}
     assert {"dispatch_experts", "attribute", "read_memory", "finalize"} <= acts
     assert all(v["verdict"] in {"accept", "correct", "reject"} for v in verdicts)
-    assert result.consensus_status in {"approved", "manual_review", "stalled"}
+    assert result.consensus_status in {
+        "approved",
+        "manual_review",
+        "stalled",
+    }
     assert result.active_experts == select_experts(REQUEST, ())
 
 
