@@ -182,13 +182,24 @@ meta_agent ── run 级常驻，think → act → observe
   │                 provided_facts → Evidence(source="human")，原文保留
   │                 → 回到循环
   │
-  ═══ 后段：确定性收尾 ═════════════════════════════════════════
+  ═══ 后段：方案生成（§5.8） ═══════════════════════════════════
   │
   ▼
-finalize ──► 最终方案生成节点（如需 LLM，是一个 L0 的 finalize spec）
+finalize ──► 方案生成节点（L0 的 planner spec）
+  │             输入：完整意见（**含身份**）+ 冻结基线证据 + 共识终态
+  │                   + 人类提供的事实 + 会话上下文
+  │             输出：PlanDraft（**骨架结构化 + 正文自由**）
+  │             失败 / offline → 回落确定性 render_markdown（plan_source=template，显式）
   │
   ▼
-manual_review / 呈现
+plan_guard ── 逐条 evidence_ids ⊆ registry；conditions 必须全部落条；
+  │            required 章节无有效条 → 拒绝整份方案、降 manual_review
+  ▼
+呈现（plan_source = agent / template）
+
+两条回路（§5.9，**不要混**）：
+  manual_review（评审未决）─► 人：补证据 / 调专家 ─► **再跑元智能体**（同一会话的新一轮 run）
+  方案已生成 ─────────────► 人：对方案提意见 ────► **只跑方案生成节点**（迭代文本，不重评）
 ```
 
 **拓扑性质**（本次修订后）：
@@ -804,6 +815,101 @@ class AssuranceLevel(BaseModel):
 **硬约束**：最终方案中任何条目不得「无支撑」。若出现无支撑条目，不得直接交付，强制人工复核。
 
 若有全部专家 `abstain` 的情形，系统应输出「证据不足以评估」，而非强行给出方案。
+
+### 5.8 方案生成节点（**新增，框架闭环的最后一环**）
+
+评审报告 ≠ 方案。`render_markdown()` 产出的是「专家意见汇总」，可交付的**方案**必须由专门节点撰写：
+按专家意见、用户反馈与共识终态，写成一份能拿去做施工/采购的文本。这一步此前只有拓扑图上的一句
+（§4.1 的 `finalize ──► 最终方案生成节点`）与一条守卫判据（§5.4.2 动作表里的 `finalize`），没有实现。
+
+**位置**：外环**后段**，在元智能体循环收束之后、呈现之前。它**不是**内环的一个 act——内环的动作空间
+是闭集（§5.4.1），方案撰写是一次性的 L0 调用，与「再跑一轮」无关。
+
+**什么时候跑**（与 §5.6.1 的三态对齐）：
+
+| 元智能体终态 | 是否生成方案 | 说明 |
+| --- | --- | --- |
+| `approved` | ✅ 生成，可交付 | 明确的交付路径 |
+| `stalled` | ⚠️ 见 **Q-24** | 倾向生成但强制标注、且 `assurance` 不得为 `history_backed` |
+| `manual_review` | ❌ **不生成** | 它不是终态交付，而是**回到中段**（见 §5.9） |
+
+**为什么 `manual_review` 不生成方案**：交人裁定的内容是**补证据**或**专家分配建议**（§5.4.3 的
+`HumanReviewRequest`），人给出这些信息后要**再跑一遍元智能体**（同一个会话的新一轮 run），而不是拿一份
+半成品方案去让人改。方案一旦生成，人再提意见走的是另一条回路（§5.9 迭代文本），**不是**重跑评审。
+
+**输入（投影是确定性函数，§3.1）**：`PlanContext`——
+- **完整意见**（含专家身份、`decision`、`constraints`、`uncertainties`、`risk_level`、`basis`、
+  `evidence_ids`）。这里**有意偏离 D-77 的匿名披露**：匿名是给**评审者**用的（防止互相影响），
+  方案撰写者是**汇总者**，它需要身份来做专业归口（「哪条由哪个专业负责」）。
+- 本轮冻结基线的证据（带 `evidence_id` 与 gist）。
+- 共识终态：`consensus_status` / `review_reason` / `conditions` / `grounding` / `assurance`。
+- 人类提供的事实（`source="human"`，原文保留，D-28）。
+- 会话上下文：`SessionSnapshot` 的历轮摘要与用户约束。
+
+**输出契约 `PlanDraft`**（**骨架结构化 + 正文自由**）：
+
+```python
+class PlanClaim(BaseModel):
+    text: str                       # 正文，自由撰写
+    evidence_ids: list[str]         # 必须 ⊆ 本轮 registry；空列表 = 无支撑，不允许
+
+class PlanSection(BaseModel):
+    heading: PlanHeading            # **枚举**：骨架由契约固定，模型不能自创章节
+    body: str                       # 该节的叙述正文，自由
+    claims: list[PlanClaim] = []    # 需要可回溯的条目
+
+class PlanDraft(BaseModel):
+    sections: list[PlanSection]     # 必含 PlanHeading 里标记为 required 的那些
+    assumption_notes: list[str] = [] # 写方案时做过的假设，显式列出
+    version: int = 1                # §5.9 迭代时递增
+```
+
+**为什么骨架必须结构化、正文可以自由**：§5.7 的硬约束是「任何条目不得无支撑」，而「哪句话靠哪条证据」
+无法从一段自由 Markdown 里机械校验。把*需要可回溯的部分*（条目 + `evidence_ids`）与*叙述部分*（`body`）
+分开，校验就落在骨架上，行文则不受模板腔的束缚。章节用**枚举**而不是自由字符串，是因为「骨架由契约固定」
+必须有可校验的形态——否则模型换个标题就算合规。
+
+**守卫判据**（落实 §5.4.2 的 `finalize` 与 §5.7 的硬约束）：
+
+1. 每个 `PlanClaim.evidence_ids` 非空且 **⊆ 本轮 registry**（越界剔除，与 D-90 同规则）；
+2. 剔除之后，`PlanHeading` 里标记 `required` 的章节若**没有任何有效条** → 拒绝整份方案，
+   `consensus_status` **降级为 `manual_review`**、`review_reason="unsupported_plan"`，交人复核（§5.7 硬约束）；
+3. **`conditions` 的每一条都必须在方案里出现**（映射到某个 `PlanClaim`）。否则「有条件通过」在交付物里
+   就变成了「无条件通过」（D-95 的原话）；
+4. `assurance` 必须成立；方案里不得出现本轮证据之外的**事实性主张**（`assumption_notes` 是显式出口）。
+
+**失败与降级**：LLM 失败 / 契约重试耗尽 / 无 LLM（offline 与单测）→ **回落到确定性 `render_markdown()`**，
+并在 `RunResult.plan_source` 上标 `"template"`（`"agent"` 为正常路径）。**降级必须显式**（P5）：报告里
+要写明「本方案由模板生成，未经方案撰写模型」。
+
+**它与 runtime 的关系**：仍是第三个 `AgentSpec`、**跑同一个 runtime**（D-84 不允许第二条执行路径），
+方法抽成目录形式技能包 `agents/skills/plan_writing/`（与 D-92 的 `expert_review` 同构）；
+L0 单次调用，动作空间为空。
+
+### 5.9 人工介入与方案迭代（两条**不同**的回路）
+
+这是两个容易混在一起的环，必须分开：
+
+```
+① 评审未决（manual_review）     人：补证据 / 调专家分配
+                                  └─► **再跑一遍元智能体**（同一会话的新一轮 run）
+
+② 方案已生成，人有修改意见        人：对方案文本提意见
+                                  └─► **只跑方案生成节点**（迭代文本，不重跑专家评审）
+```
+
+**① 评审未决的回路**：`manual_review` 是**中段的出口**，不是终点。当前实现只做到了**前置一次性 HITL**
+（无历史分支的 `HumanReviewRequest`），`HumanReviewRequest.reason` 也只有 `no_history` 一个取值。
+要闭环需要：`reason` 扩为 `no_history | missing_evidence | expert_assignment | disagreement`，
+并把「人给料 → 回中段」表达为**同一会话的新一轮 run**（`provided_facts` 登记为 `source="human"` 的
+一等证据、专家增删经 `HumanDecision` 落到激活集）。**不做 in-run 挂起/恢复**——那是 §9.4 checkpoint
+的活，另立项（当前 `resume_token` 只是设计描述）。
+
+**② 方案迭代的回路**：载体是 `RunInput.plan_feedback`（用户对上一版方案的逐条意见）+
+`SessionSnapshot` 携带**上一版 `PlanDraft`**（`TurnSummary` 现在只有 `conclusion` 散文，不够）。
+新一轮的走法是**只跑后段**：不重跑专家评审，`PlanDraft.version` 递增；除非用户意见明确要求重评
+（那属于 ①）。两条回路的区别是**要不要动事实基线与专家意见**——迭代文本不动，重评要动。
+
 ---
 
 ## 6. 契约清单（字段级草案）
@@ -1858,6 +1964,13 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 | D-95 | 共识判定分**两层**：① *是否收敛*（决定要不要继续迭代）= 结构化规则「无 `reject` + 至少一位 `approve` + 支持度 ≥ threshold」；② *停止时如何分类*（决定交给人还是交付）= 有 `reject` → `manual_review`、无人反对 → **新增 `conditional`**（一致认为方向可行、需先满足前置条件）（**`conditional` 已于 D-96 取消**：分类收为「交付 / 交人」两个出口，该情形记为 `manual_review` + `review_reason="conditions_only"`；前置条件仍随交付物走）。标量分数**降为描述性支持度**（只用于区分「明确通过」与交人，不再决定「交给人还是交付」）；新增 `RunResult.conditions`（前置条件汇总，去重排序） | 优化前由 `score ≥ threshold` 一个标量决定一切，而 `score = 0.5 + (a − j − x)/2` 里 `revise` 被完全消掉，于是「全员一致附条件」与「赞反对峙」算出**同一个 0.5000**——一个无法区分这两种局面的数字不该拥有裁定权（实测：`半 approve 半 reject` = `全 revise` = 0.5000）。同一个公式还带来两处错配：**全 `revise` 恒 0.50 结构性不可通过**，被误报成「专家分歧未解决」；**结论对激活规模敏感**（1 位赞成 + 其余仅提条件：n=5 恰好 0.60 通过、n=6 为 0.5833 不通过）。改法把「阻断类」判据（缺席 / 证据缺口 / 有人反对 / 无人赞成）全部改成**结构化的构成判断**，与分数和规模无关；分数保留为可解释的支持度，用于区分「明确通过」与「附条件交付」。残余的规模敏感性只留在这一档（见 Q-26）。前置条件必须随交付物走（`conditions`），否则「有条件通过」在交付物里会变成「通过」 | `[已定]` |
 | D-96 | 共识状态**收成三个取值**（`approved` / `manual_review` / `stalled`），只回答「交付还是交人」；「**因为什么交人**」移入新字段 `RunResult.review_reason`（`quorum` / `disagreement` / `conditions_only` / `evidence_gap`），由 `manual_review_reason()` 按专家意见的**构成**确定性判定、经外环以 `reason_fn` 回调注入内环；`assurance` 的降级判据由 `status == "insufficient_evidence"` 改为 `review_reason == "evidence_gap"`；报告新增「交人原因」行。**`conditional` 与 `insufficient_evidence` 两个取值取消**（推翻 D-93 / D-95 的取值部分，D-82 的 `stalled` 保留） | 这两条信息**本来就在专家意见里**（有人反对 / 全部附条件 / 全员弃权），各做成一个状态取值等于要求每个消费者为每种理由各写一个分支，而它们**没有对应的行为差**：收束 act 一直是 `closing(status == "approved", status == "stalled")`，`conditional` 从未因此自动交付——它实际也在问人，**状态值与实际行为不一致**。并掉之后状态机不必再为「交人」发明取值，而区分一条不丢：`test_a_deadlock_is_not_reported_as_agreement` 钉住「半赞成半反对」与「全 revise」的原因仍分别是 `disagreement` 与 `conditions_only`。顺带补上一条**此前根本没有**的信息：D-37 只规定「缺席不得当作通过」，从未给缺席一个可辨认标签，于是「有人没交出意见」与「专家分歧未决」在契约里一模一样——现在缺席是 `quorum`。`stalled` 不并入，是因为它在「交给谁」这一层确实不同（流程已停 vs 需人裁定），且另有 `stall.stalled` 作为结构化载体 | `[已定]` |
+| D-98 | **方案生成节点**落成外环后段的独立 L0 节点（第三个 `AgentSpec`、跑同一个 runtime、方法抽成 `agents/skills/plan_writing/`）：输入 = 完整意见（含身份）+ 冻结基线证据 + 共识终态 + 人类事实 + 会话上下文；输出 = `PlanDraft`（**骨架结构化 + 正文自由**：章节用枚举，条目带 `evidence_ids`，行文自由）；守卫判据 = 逐条 `evidence_ids ⊆ registry`、`conditions` 必须全部落条、required 章节无有效条则**拒绝整份并降 `manual_review`**；LLM 失败 / offline → 回落确定性 `render_markdown`，标 `plan_source="template"` | 评审报告 ≠ 方案：拓扑图（§4.1）早就画了「最终方案生成节点（L0 的 finalize spec）」、§5.4.2 也写了 `finalize` 的守卫判据，但实现里 `finalize` 是个 `pass`，最后由确定性 `render_markdown()` 吐出一份**专家意见汇总**——用户拿不到能施工的东西，框架因此没有闭环。**章节必须枚举、正文才可以自由**：§5.7 的硬约束是「任何条目不得无支撑」，而「哪句话靠哪条证据」无法从自由 Markdown 里机械校验；把需要可回溯的部分与叙述部分分开，校验才落在骨架上，行文也不被模板腔绑住。**必须有模板降级**：offline 与单测不能因为多了个 LLM 节点就跑不动，降级且显式（P5）才既闭环又不破既有验证 | `[已定]` |
+| D-99 | **两条人工回路分开**：①*评审未决*（`manual_review`）是**中段的出口而非终点**——人补证据 / 调专家分配后**再跑一遍元智能体**（同一会话的新一轮 run；`HumanReviewRequest.reason` 扩为 `no_history \| missing_evidence \| expert_assignment \| disagreement`）；②*方案已生成后有修改意见* → **只跑方案生成节点**迭代文本（`PlanDraft.version` 递增），不重跑专家评审。`manual_review` 时**不生成方案** | 两件事的差别是**要不要动事实基线与专家意见**：迭代文本不动，重评要动。混起来会同时错两头——交人时给人一份半成品方案（人真正要补的是证据，不是改措辞），或在改措辞时白跑一轮评审（付费，且破坏「同一批事实」这一共识前提）。当前实现只做到**前置一次性 HITL**（无历史分支），本轮把它表达为「同一会话的新一轮 run」而不是 in-run 挂起/恢复——后者是 §9.4 checkpoint 的活，另立项 | `[已定]` |
+| D-100 | 方案撰写智能体看**完整意见（含专家身份）**，**有意偏离 D-77 的匿名披露** | D-77 的匿名是给**评审者**用的：防的是同行压力污染独立判断。方案撰写者不是评审者而是**汇总者**，它需要身份做专业归口（「哪条由哪个专业负责」），也需要知道「谁明确反对」才能把异议写进待确认事项。匿名披露的范围因此是**按角色**划的，而不是全局规则——这条记录就是为了让那次偏离是**决定**而不是疏漏 | `[已定]` |
+
+> 编号 **D-97** 与 **Q-27…Q-29** 由已关闭的 PR #16（缺口回填）保留：那批工作未合并，但它的实测
+> 结论（图腿把每个 query 当节点名子串匹配 → 缺口 query 必然 0 命中；fixture 条目自称
+> `source=graph` 会让演示 run 报 `history_backed`）影响本节的证据可回溯性，重启时沿用原编号。
 
 ---
 
@@ -1890,7 +2003,8 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 | Q-23 | 元智能体上下文 L3（`EvidenceMeta` 全集）的裁剪判据 | 按 `disciplines` / 按轮次 / 按 token 预算 | 倾向「按 `disciplines` 预筛 + 按 token 预算二次裁剪」，裁剪必须落事件 |
 | Q-25 | 共识阈值（`CONSENSUS_THRESHOLD`，默认 0.6）的依据 | 标定 / 明确登记为策略选择 | AGENTS.md §3.5 要求阈值改动给出标定依据，而本项**既没有标定数据、也不在设计文档里**（design 第 6 行明确「不含阈值参数取值」）；P7 要求「阈值、策略均需快照记录」。D-95 之后它只决定「明确支持够不够」（`approved` 与交人之间的那一档），不再决定是否交人，因此风险已降低，但依据仍缺 |
 | Q-26 | 「明确支持」的门槛该用**份额**还是**票数** | 份额（现状）/ 票数 `approve ≥ k` / 取消该档 | 现状是份额口径，因此「1 位赞成 + 其余仅提条件」在 n=5 时为 `approved`、n=6 时为 `manual_review`（0.167）。残余的规模敏感性只在这一档，不影响「交人还是交付」之外的其他判定；改成票数口径可以让它与规模完全无关，代价是多一个需要标定的 k |
-| Q-24 | `stalled` 时是否仍产出方案 | 产出并标注 / 只交人工 | 倾向产出但**强制标注 `stalled`** 且 `assurance` 不得为 `history_backed`；需与 §5.7 的「无支撑条目强制人工复核」对齐 |
+| Q-24 | `stalled` 时是否仍产出方案 | 产出并标注 / 只交人工 | 倾向产出但**强制标注 `stalled`** 且 `assurance` 不得为 `history_backed`；需与 §5.7 的「无支撑条目强制人工复核」对齐。D-98 只定了「`manual_review` 不出方案」，`stalled` 这一档留在这里 |
+| Q-30 | `PlanHeading` 的固定章节集合与哪些是 **required**（D-98 的骨架） | 由工程/业务给一份章节清单 / 沿用旧 Dify 实现（`D:\workspace\变更方案生成` 的 56 节点版本）的方案模板 / 先取最小集（变更范围 / 技术依据 / 施工与采购要求 / 风险与前置条件 / 待确认事项 / 证据索引） | 骨架必须枚举才有可校验的形态（D-98），但「一份可施工的变更方案必须包含哪些章节」是**业务判断**，不该由实现者拍。最小集可以先把闭环跑通，`required` 标记留待业务确认后再收紧 |
 | Q-27 | 检索后端降级时 `assurance = history_backed` 的依据是什么 | 只认图谱侧历史案例 / 降级即强制 `knowledge_based` / 分别记录两条通道 | D-96 的真实 run 中检索后端报了降级（`LlamaIndex 检索不可用：ResponseHandlingException [WinError 10061] 目标计算机积极拒绝`，即向量侧的 embedding 端未启动），但同一次 run 的 `assurance` 仍是 `history_backed`——图谱侧命中历史案例可以解释它，但**本次没有专门验证**「降级状态下有没有任何向量侧证据被当作历史依据」。两种可能的影响相反：若 `history_backed` 只来自图谱，则现状正确；若它把「检索失败但注册表非空」也算作历史支撑，则 §5.7 的保证等级在降级时会高报 |
 
 ---
@@ -1931,4 +2045,4 @@ LLM 自报的 `confidence` **校准很差**（普遍过度自信）。若进入�
 
 *本文件为讨论中的设计基线，随讨论更新。修改时请同时更新 §10 决策记录与 §11 待决事项的状态。*
 
-*最近一次修订：共识状态收成三个取值，「交人原因」移入 `review_reason`（D-96）。修订要点：D-93 / D-95 各自新增的状态取值（`insufficient_evidence` / `conditional`）**取消**——它们区分的四种情形（有人反对 / 全部附条件 / 全员弃权 / 有人缺席）本来就在专家意见里，而每个取值都要求所有消费者多写一条**没有行为差**的分支（收束 act 一直只认 `approved` / `stalled`，`conditional` 从未因此自动交付，它实际也在问人——状态值与实际行为不一致）。现在状态值只回答「交付还是交人」，「因为什么交人」由 `RunResult.review_reason` 回答（`quorum` / `disagreement` / `conditions_only` / `evidence_gap`），判定函数经外环 `reason_fn` 回调注入内环（与 D-73 一致），报告新增「交人原因」行，`assurance` 的降级判据改按原因标签。区分一条不丢（「半赞成半反对」与「全 revise」的原因仍分别是 `disagreement` / `conditions_only`），并**新增**了此前根本没有的一条信息：缺席（`quorum`）与分歧此前在契约里长得一模一样。`stalled` 按 D-82 保留。再上一轮为共识判定分两层（D-95）：标量分数从**判据**降为**描述性支持度**——`score = 0.5 + (a − j − x)/2` 里 `revise` 被消掉，导致「全员一致附条件」与「赞反对峙」同为 0.5000、且全 `revise` 恒不可通过、结论对激活规模敏感；现在阻断类判据（缺席 / 证据缺口 / 有人反对 / 无人赞成）全部改为结构化构成判断，前置条件进 `RunResult.conditions`。再上一轮为弃权分类与证据缺口通道（D-93 / D-94）。修订要点：弃权按**来源**分两类（判断性 / 执行失败）并由服务端判定，quorum 只拦后者；证据缺口由专家的待补清单**确定性派生**成 `EvidenceRequest`，经 act 通道登记并进入 `RunResult.evidence_requests`（检索端未落地时显式记为未满足）。再上一轮为专家评审技能化 + 弃权策略修正（D-92）。修订要点：评审抽成目录形式技能包 `agents/skills/expert_review/`（`SKILL.md` + prompt / personas / runner），六个专家复用同一技能；**专业判断可基于领域通识**，`abstain` 收窄为「超出专业范围 / 请求无法判定」——修正了「语料缺技术参数 → 全体弃权 → 第 1 轮即止」的真实故障；新增 `ExpertOpinion.basis` 并按它降级保证等级。再上一轮为 harness 竖切（D-89…D-91），更早为十模块布局（D-88）、振荡检测（D-87）、调用上下文外移（D-86）与元智能体架构（D-70…D-85）。*
+*最近一次修订：**方案生成节点**——把框架闭环的最后一环补上（D-98 / D-99 / D-100，§5.8 / §5.9）。修订要点：拓扑图（§4.1）与动作表（§5.4.2）早就画了「最终方案生成节点（L0 的 finalize spec）」与它的守卫判据，但实现里 `finalize` 是个 `pass`，最后由确定性 `render_markdown()` 吐出一份**专家意见汇总**——评审报告 ≠ 方案，用户拿不到能施工的东西。现在它落成外环后段的独立 L0 节点：输入 = 完整意见（**含身份**，D-100 有意偏离 D-77 的匿名披露，因为撰写者是汇总者不是评审者）+ 冻结基线证据 + 共识终态 + 人类事实 + 会话上下文；输出 = `PlanDraft`（**骨架结构化 + 正文自由**：章节用枚举、条目带 `evidence_ids`、行文自由——这样 §5.7「任何条目不得无支撑」才可机械校验，而行文不被模板腔绑住）；守卫判据 = 逐条可回溯、`conditions` 必须全部落条、required 章节无有效条则拒绝整份方案并**降 `manual_review`**；LLM 失败 / offline 回落到确定性模板并标 `plan_source="template"`（P5）。同时把**两条人工回路分开**（D-99）：`manual_review` 是**中段的出口而非终点**（人补证据 / 调专家后**再跑元智能体**，同一会话的新一轮 run），而方案生成后的修改意见走**只跑方案生成节点**的迭代回路（不动事实基线与专家意见）——`manual_review` 时**不生成方案**。新增 **Q-30**（`PlanHeading` 的固定章节集合是业务判断，不拍板），D-97 与 Q-27…Q-29 由已关闭的 PR #16 保留编号。再上一轮为共识状态收成三个取值、「交人原因」移入 `review_reason`（D-96）。修订要点：D-93 / D-95 各自新增的状态取值（`insufficient_evidence` / `conditional`）**取消**——它们区分的四种情形本来就在专家意见里，而每个取值都要求所有消费者多写一条**没有行为差**的分支（收束 act 一直只认 `approved` / `stalled`，`conditional` 从未因此自动交付）。现在状态值只回答「交付还是交人」，原因由 `RunResult.review_reason` 回答（`quorum` / `disagreement` / `conditions_only` / `evidence_gap`），判定函数经外环 `reason_fn` 回调注入内环（与 D-73 一致），报告新增「交人原因」行，`assurance` 的降级判据改按原因标签。区分一条不丢，并**新增**了此前根本没有的一条信息：缺席（`quorum`）与分歧此前在契约里长得一模一样。`stalled` 按 D-82 保留。再上一轮为共识判定分两层（D-95）：标量分数从**判据**降为**描述性支持度**——`score = 0.5 + (a − j − x)/2` 里 `revise` 被消掉，导致「全员一致附条件」与「赞反对峙」同为 0.5000、且全 `revise` 恒不可通过、结论对激活规模敏感；现在阻断类判据（缺席 / 证据缺口 / 有人反对 / 无人赞成）全部改为结构化构成判断，前置条件进 `RunResult.conditions`。再上一轮为弃权分类与证据缺口通道（D-93 / D-94）。修订要点：弃权按**来源**分两类（判断性 / 执行失败）并由服务端判定，quorum 只拦后者；证据缺口由专家的待补清单**确定性派生**成 `EvidenceRequest`，经 act 通道登记并进入 `RunResult.evidence_requests`（检索端未落地时显式记为未满足）。再上一轮为专家评审技能化 + 弃权策略修正（D-92）。修订要点：评审抽成目录形式技能包 `agents/skills/expert_review/`（`SKILL.md` + prompt / personas / runner），六个专家复用同一技能；**专业判断可基于领域通识**，`abstain` 收窄为「超出专业范围 / 请求无法判定」——修正了「语料缺技术参数 → 全体弃权 → 第 1 轮即止」的真实故障；新增 `ExpertOpinion.basis` 并按它降级保证等级。再上一轮为 harness 竖切（D-89…D-91），更早为十模块布局（D-88）、振荡检测（D-87）、调用上下文外移（D-86）与元智能体架构（D-70…D-85）。*
