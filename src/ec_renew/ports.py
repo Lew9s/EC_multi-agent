@@ -63,6 +63,11 @@ class RetrieverPort(Protocol):
                     departments -> disciplines). This is what makes abstract
                     user requests resolvable.
     ``prefetch``  — the baseline evidence for one round.
+
+    Optional marker: ``is_fixture = True`` on a deterministic stand-in whose
+    ``prefetch`` ignores the query. The outer ring reads it with
+    ``getattr(..., False)`` and **warns** — a fixture run must never look like a
+    real retrieval run that found history (see ``workflow.run``).
     """
 
     async def link(self, request: str) -> list[EntityRef]: ...

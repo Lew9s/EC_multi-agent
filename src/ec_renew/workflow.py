@@ -136,6 +136,10 @@ async def prefetch_baseline(
         "baseline_frozen",
         count=len(bundle.baseline_ids),
         warnings=list(bundle.warnings),
+        # 原 query 集必须进事件日志（D-97）：否则事后**无法**核对「缺口回填用的 query 与基线用的
+        # query 是否不同」——而那正是「补充资料」这个机制成立的最低条件。query 全是确定性模板
+        # （请求 + 图实体名），不含模型自由文本，落盘安全（D-94）。
+        queries=list(intent.query_set),
     )
     return bundle
 
@@ -225,7 +229,11 @@ async def refill_evidence(
         )
     bundle.baseline_ids = ctx.registry.all_ids()
     ctx.events.emit(
-        "evidence_refill_done", round=round_no, requests=len(pending), new_ids=len(added)
+        "evidence_refill_done",
+        round=round_no,
+        requests=len(pending),
+        new_ids=len(added),
+        queries=[request.query for request in pending],
     )
     return added
 
@@ -631,6 +639,20 @@ async def run(
     ctx.events.emit("node_started", node="prefetch")
     bundle = await prefetch_baseline(intent, ctx, top_k)
     grounding = assess_grounding(bundle)
+    # 后端是**确定性内存 fixture** 时必须显式告警（P5）：它忽略 query、恒返回同一批构造数据，
+    # 而它的条目标着 `source="graph"` → `grounding` 会报 `history_backed`。两者合起来的后果是
+    # 一次「本来就是演示数据」的 run 看起来像「命中了历史案例」。真实 run 里发生过：缺口回填的
+    # 三条请求全是「命中 3 条、新增 0 条」，被读成了「语料不够」——其实是 fixture 保证的结果。
+    if getattr(ctx.retriever, "is_fixture", False):
+        warnings.append("retriever_is_fixture")
+        ctx.events.emit(
+            "degradation",
+            level="retriever",
+            reason=(
+                "检索后端是内存 fixture：忽略 query、恒返回构造数据，其条目 source=graph 会让"
+                "依据等级报 history_backed。本次结论仅作流程演示，不可当作检索结论"
+            ),
+        )
     ctx.events.emit(
         "grounding_assessed",
         basis=grounding.basis,

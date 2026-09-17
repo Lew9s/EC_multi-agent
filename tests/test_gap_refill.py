@@ -18,10 +18,14 @@ import asyncio
 import json
 import re
 
+from ec_renew.agents.guard import LoopState
 from ec_renew.agents.memory import EvidenceRegistry
+from ec_renew.agents.meta import RuleSkeleton
 from ec_renew.contracts import (
+    EntityRef,
     EvidenceBundle,
     EvidenceMeta,
+    ExpertOpinion,
     GraphExpansion,
     LLMCallMeta,
     LLMResult,
@@ -31,11 +35,12 @@ from ec_renew.contracts import (
 from ec_renew.errors import TransientError
 from ec_renew.observability import NullEventLog
 from ec_renew.ports import RunContext
-from ec_renew.workflow import run
+from ec_renew.workflow import build_queries, run
 
 REQUEST = "301分段FR36污水井更换加厚板，涉及焊接，需确认合规性"
 BASE_LABEL = "SRC-BASE-1"
 GAP_LABEL = "SRC-GAP-1"
+EID = "E-9c4b1e7a2f03"
 
 
 class _Sink:
@@ -160,6 +165,66 @@ def _run(
     )
     result = asyncio.run(run(RunInput(request=REQUEST), ctx, max_rounds=max_rounds))
     return ctx, result
+
+
+# --------------------------------------------------------------------------- #
+# 0) 「补充资料」的最低条件：缺口 query 必须与原 query **不同**
+# --------------------------------------------------------------------------- #
+
+
+def test_a_gap_query_is_a_different_query_from_every_baseline_query() -> None:
+    """这是 @用户 提出的判据：**query 不一样**，补充资料的机制才谈得上成立。
+
+    只看文本层（确定性、无需任何后端）：缺口 query 由 D-94 派生，形式是
+    `归一化请求｜需补充：<词表命中的词>`；原 query 集由 `build_queries` 产出，形式是
+    `请求 / 实体名 / 实体名 历史变更`。
+
+    两条断言：
+    1. 缺口 query **不等于**原 query 集里任何一条（逐字），否则回填就是把同一个检索再跑一遍；
+    2. 缺口 query **不是**原请求的复制（长度与字符集都变了），否则「补充」只是字面上的。
+
+    这条用例守的是**机制的可成立性**，与当前知识库里有没有内容无关——若将来有人把缺口 query
+    「简化」成直接复用请求词，这里会红。
+    """
+    request = REQUEST
+    baseline_queries = build_queries(
+        request, [EntityRef(name="FR36", kind="COMPONENT", in_graph=True, graph_key="FR36")]
+    )
+    state = LoopState()
+    state.latest = {
+        "E01": ExpertOpinion(
+            expert="E01",
+            decision="revise",
+            evidence_ids=[EID],
+            uncertainties=["缺少规范、标准、图集与证书依据"],
+        )
+    }
+    gaps = RuleSkeleton().gaps(state, request=request)
+
+    assert gaps, "前提：这条不确定项必须能派生出缺口请求"
+    for gap in gaps:
+        assert gap.query not in baseline_queries, "补充资料的 query 与原 query 逐字相同 = 机制空转"
+        assert gap.query != request, "补充资料的 query 不能就是原请求"
+        assert request in gap.query, "缺口 query 必须带着原始请求（否则检索失去上下文）"
+        assert gap.query.startswith(request), "差异来自**追加**的词表词，而不是换了一个问题"
+        hit_part = gap.query[len(request) :]
+        assert len(hit_part) > 3, f"追加部分形同虚设：{hit_part!r}"
+
+
+def test_the_baseline_query_set_is_recorded_in_the_events() -> None:
+    """事后**可核对**：原 query 集与缺口 query 都必须能从事件里看到。
+
+    此前两者都没有落盘，于是「缺口 query 与原 query 到底一样不一样」这个问题**无法从运行产物
+    回答**——只能靠读源码猜。这个可观测性缺口正是把一次 fixture run 误读成「语料不够」的原因之一。
+    """
+    sink = _Sink()
+    _ctx, _result = _run(_ScriptedRetriever(), _ReviseLLM(), sink, max_rounds=2)
+
+    frozen = [fields for name, fields in sink.events if name == "baseline_frozen"]
+    refilled = [fields for name, fields in sink.events if name == "evidence_refill_done"]
+    assert frozen and frozen[0]["queries"], "原 query 集必须进事件"
+    assert refilled and refilled[0]["queries"], "缺口 query 必须进事件"
+    assert set(frozen[0]["queries"]).isdisjoint(refilled[0]["queries"]), "两者不得重合"
 
 
 # --------------------------------------------------------------------------- #

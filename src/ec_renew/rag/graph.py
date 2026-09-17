@@ -83,7 +83,18 @@ def is_partial_identifier(name: str, request: str) -> bool:
 
 
 class InMemoryRetriever:
-    """Deterministic fixture: enough shape to exercise every code path."""
+    """Deterministic fixture: enough shape to exercise every code path.
+
+    ``prefetch()`` **完全忽略 query**，恒返回同一批构造数据；而且这些条目标着
+    ``source="graph"``，因此 ``assess_grounding()`` 会据此报 ``history_backed``。两件事合起来
+    的后果是：一次「本来就是演示数据」的 run 看起来像「命中了历史案例」。所以这里带一个
+    ``is_fixture`` 标记，由 ``workflow.run()`` 读出来并**显式告警**（P5）——真实 run 里正是
+    因为缺这个信号，一次降级到 fixture 的 run 被读成了「语料不够」。
+    """
+
+    #: 外环据此告警。用 ``getattr(..., False)`` 读，因此真实实现不必声明它
+    #: （`workflow` 不许 import `rag`，见 `tests/test_layering.py`）。
+    is_fixture = True
 
     def __init__(self, components: Sequence[str] | None = None, cases: int = 3) -> None:
         self.components = list(components or ["FR36", "污水井", "肋板"])
