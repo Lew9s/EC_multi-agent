@@ -118,7 +118,8 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **判断可以基于领域通识**：本轮证据给不出技术细节时专家仍须给判断（revise/reject + 待补清单），`abstain` 只留给「超出专业范围 / 请求无法判定」（D-92）
 - **保证等级看实际依据**：每条意见声明 `basis`（evidence / knowledge / mixed），声明 knowledge 的权重占比 > 0.5 时保证等级降为 `knowledge_based`——检索命中历史 ≠ 专家用了它
 - **弃权分两类**：判断性弃权（模型说「我无法结论」）是**交付**，执行失败弃权（超时/契约耗尽）才是**缺席**；quorum 只拦后者（D-93）
-- **四种收敛状态**：`approved` 交付 / `manual_review` 分歧交人工 / `stalled` 流程已停 / `insufficient_evidence` **证据不足 → 补证据**（带结构化缺口清单，D-93）
+- **五种收敛状态**（每个都对应不同的补救动作，D-82/D-93/D-95）：`approved` 交付 / `conditional` **无人反对但无人无条件赞成 → 交付带前置条件的方案** / `manual_review` 有人明确反对 → 人工裁定 / `stalled` 流程已停（不动点）/ `insufficient_evidence` 证据不足 → 补证据（带结构化缺口清单）
+- **判定分两层**：是否收敛（结构化规则，决定要不要继续迭代）与停止时如何分类（决定交给人还是交付）分开；`共识分` 降为**描述性支持度**，不再单独决定判定（D-95）
 - **缺口清单是结构化产出**：由专家的 `uncertainties`/`constraints` 经固定词表确定性派生成 `EvidenceRequest`，进 `RunResult.evidence_requests` 与报告专节（D-94）
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）

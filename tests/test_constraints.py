@@ -535,10 +535,15 @@ def test_a_fixed_point_stops_the_loop_and_is_reported_as_stalled() -> None:
 
 def test_a_moving_round_is_not_mistaken_for_a_stall() -> None:
     """Same decisions every round, but the rationale keeps changing — so the
-    next prompt really does differ and this is not a fixed point."""
+    next prompt really does differ and this is not a fixed point.
+
+    终态是 `conditional` 而不是 `manual_review`：全员 `revise`、无人反对（D-95）——
+    此前那被报成「专家未能达成一致，请裁」，而事实是四位专家**一致**认为方向可行、
+    只是各自列出了前置条件。
+    """
     result = _run_offline(_FixedPointLLM(vary_rationale=True))
 
-    assert result.consensus_status == "manual_review"
+    assert result.consensus_status == "conditional"
     assert result.rounds == 3
     assert result.stall.stalled is False
     assert "max_rounds_reached" in result.warnings

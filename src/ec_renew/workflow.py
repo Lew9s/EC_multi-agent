@@ -26,7 +26,7 @@ from functools import partial
 
 from .agents.experts import select_experts
 from .agents.guard import Guard
-from .agents.memory import MemoryService
+from .agents.memory import MemoryService, collect_hard_constraints
 from .agents.meta import RuleSkeleton
 from .agents.runtime import META_SPEC, AgentRuntime
 from .config import settings as default_settings
@@ -184,11 +184,24 @@ def consensus(
     weights: dict[str, float],
     threshold: float,
     min_effective: int,
+    *,
+    final: bool = False,
 ) -> tuple[float, int, str]:
-    """Denominator is the configured weight sum (D-38).
+    """共识判定（D-38 / D-93 / **D-95**）。分两层，**不要混用**：
 
-    An abstaining expert contributes 0 to the numerator but keeps its weight in
-    the denominator, so abstaining can only *lower* the score.
+    1. **是否收敛**（决定要不要继续迭代）——结构化规则，不是分数：
+       `无 reject、且至少一位 approve、且支持度 ≥ threshold`。
+    2. **停止时如何分类**（决定交给人还是交付）——由决策构成直接判定：
+       有 `reject` → `manual_review`（有人明确反对，交人裁定）；无 `reject` 且无人 `approve`
+       （全 `revise`）→ `conditional`（一致认为方向可行、需先满足条件）。
+
+    为什么把分数从**判据**降为**描述性支持度**（D-95）：`score = 0.5 + (a − j − x)/2` 里
+    `revise` 被完全消掉，于是「全员一致附条件」与「赞反对峙」算出**同一个 0.5000**——一个无法
+    区分这两种局面的数字不该拥有裁定权。分数照旧计算并报告（它仍表达「明确支持的强度」，用于
+    区分 `approved` 与 `conditional`），但它不再决定「交给人还是交付」。
+
+    另两条不变：分母是**配置权重和**（D-38，弃权计 0 分故只能压低分数）；`final=False` 时
+    未收敛一律返回 `retry`（循环继续），终态由外环在轮次结束时以 `final=True` 取得。
     """
     # 「有效专家」= **交付了意见**的专家（D-93）。弃权是一次交付（它是一条完整的、带证据的
     # 判断），只有**执行失败**才是缺席。D-37 的原意是「避免缺席被当作通过」，此前却把「缺席」
@@ -212,7 +225,22 @@ def consensus(
     )
     denominator = sum(weights.get(expert, 0.0) for expert in weights)
     score = round(numerator / denominator, 4) if denominator else 0.0
-    return score, effective, "approved" if score >= threshold else "retry"
+
+    # --- 第 1 层：是否收敛（决定要不要继续迭代） -------------------------- #
+    has_reject = any(op.decision == "reject" for op in delivered.values())
+    has_approve = any(op.decision == "approve" for op in delivered.values())
+    if not has_reject and has_approve and score >= threshold:
+        return score, effective, "approved"
+    if not final:
+        return score, effective, "retry"
+
+    # --- 第 2 层：停止时的分类（决定交给人还是交付） ---------------------- #
+    # 有人明确反对 → 交人裁定。**不再被「赞成票更多」平均掉**：`reject` 的语义是「不可接受」，
+    # 那是需要人裁定的分歧（§5.6.1 对 `manual_review` 的定义）。
+    if has_reject:
+        return score, effective, "manual_review"
+    # 无人反对、只是没人无条件赞成（多为全员 `revise`）→ 一致认为方向可行、需先满足条件。
+    return score, effective, "conditional"
 
 
 def _knowledge_share(opinions: dict[str, ExpertOpinion], weights: dict[str, float]) -> float:
@@ -360,13 +388,14 @@ def render_markdown(
     evidence_gists: dict[str, str],
     oscillation: Mapping[str, int] | None = None,
     evidence_requests: Sequence[EvidenceRequest] = (),
+    conditions: Sequence[str] = (),
 ) -> str:
     lines = [
         "# 工程变更方案",
         "",
         f"- 请求：{request}",
         f"- 依据等级：{'history_backed' if grounding.has_history else 'knowledge_based'}",
-        f"- 共识分：{score:.2f}（阈值 {threshold:.2f}）",
+        f"- 支持度：{score:.2f}（描述性统计，不单独决定判定：明确通过还需「无反对」）",
         f"- 状态：{status}",
         f"- 轮次：{rounds}",
     ]
@@ -390,6 +419,14 @@ def render_markdown(
         if op.uncertainties:
             lines.append("- 不确定：" + "；".join(op.uncertainties))
         lines.append(f"- 引用证据：{', '.join(sorted(op.evidence_ids))}")
+        lines.append("")
+
+    if conditions:
+        # 前置条件是交付物的一部分（D-95）：`conditional` 时它就是结论本身。
+        lines.append("## 前置条件（施工/采购前必须满足）")
+        lines.append("")
+        for item in conditions:
+            lines.append(f"- {item}")
         lines.append("")
 
     if evidence_gists:
@@ -562,6 +599,9 @@ async def run(
     evidence_gists = {
         ref.evidence_id: ref.gist for ref in ctx.registry.refs(ctx.registry.all_ids())
     }
+    # 前置条件是**交付物的一部分**（D-95）：`conditional` 终态下它们就是结论本身，
+    # `approved` 终态下它们仍然必须跟着走——否则「有条件通过」在交付物里会变成「通过」。
+    conditions = collect_hard_constraints(loop.latest.values())
     conclusion = render_markdown(
         request=intent.normalized_request,
         grounding=grounding,
@@ -573,6 +613,7 @@ async def run(
         evidence_gists=evidence_gists,
         oscillation=stall.reversals,
         evidence_requests=loop.evidence_requests,
+        conditions=conditions,
     )
 
     # 保证等级必须反映**专家实际用的依据**，而不只是「检索有没有命中」。真实 run 里出现过
@@ -623,6 +664,7 @@ async def run(
         consensus_status=loop.status,  # type: ignore[arg-type]
         stall=stall,
         evidence_requests=loop.evidence_requests,
+        conditions=conditions,
         grounding=grounding,
         assurance=assurance,
         usage=loop.usage,

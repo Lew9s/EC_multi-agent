@@ -607,17 +607,22 @@ class RunResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     active_experts: list[str] = Field(default_factory=list)
     consensus_score: float = 0.0
-    #: 收敛状态（D-82 / D-93）。四个取值的补救动作**互不相同**，混用会错配：
-    #: ``approved`` 交付方案；``manual_review`` 专家仍有分歧 → 人工裁定；
-    #: ``stalled`` 流程已无信息增益（不动点）；``insufficient_evidence`` 专家**一致判断证据
-    #: 不足** → 补证据（带结构化缺口清单），不是再投票。
+    #: 收敛状态（D-82 / D-93 / D-95）。五个取值的补救动作**互不相同**，混用会错配：
+    #: ``approved`` 交付；``conditional`` **无人反对、但无人无条件赞成**（一致认为方向可行、
+    #: 需先满足前置条件）→ 交付「带条件的方案」+ `conditions`；``manual_review`` 有人**明确反对**
+    #: → 人工裁定；``stalled`` 流程已无信息增益（不动点）；``insufficient_evidence`` 专家一致判断
+    #: 证据不足 → 补证据（带结构化缺口清单）。
     consensus_status: Literal[
-        "approved", "manual_review", "stalled", "insufficient_evidence"
+        "approved", "conditional", "manual_review", "stalled", "insufficient_evidence"
     ] = "manual_review"
     stall: StallReport = Field(default_factory=StallReport)
     #: 结构化的证据缺口清单（D-94）。此前「缺什么」只沉在渲染文本里，机器消费者拿不到；
     #: 现在它是契约的一部分：每条都可直接喂给检索端（``RetrieverPort.search()`` 落地后即刻生效）。
     evidence_requests: list[EvidenceRequest] = Field(default_factory=list)
+    #: 交付物必须携带的**前置条件**（D-95）：专家写下的「施工/采购前必须满足什么」，去重排序后
+    #: 的汇总。无论终态是 `approved` 还是 `conditional`，条件都不能丢——否则「有条件通过」在
+    #: 交付物里就变成了「通过」。
+    conditions: list[str] = Field(default_factory=list)
     grounding: Grounding = Field(default_factory=Grounding)
     assurance: AssuranceLevel = Field(default_factory=AssuranceLevel)
     usage: Usage = Field(default_factory=Usage)

@@ -284,9 +284,7 @@ class AgentRuntime:
         request: str,
         sub_questions: Sequence[SubQuestion] = (),
         max_rounds: int = 3,
-        consensus_fn: Callable[
-            [dict[str, ExpertOpinion], dict[str, float]], tuple[float, int, str]
-        ],
+        consensus_fn: Callable[..., tuple[float, int, str]],
         stall_fn: Callable[
             [dict[str, ExpertOpinion], dict[str, ExpertOpinion], Sequence[str], Sequence[str]], bool
         ],
@@ -395,7 +393,10 @@ class AgentRuntime:
             previous_baseline = list(state.baseline)
 
         if status == "retry":
-            status = "manual_review"
+            # 轮次耗尽仍未收敛：**终态由外环的裁定函数给出**（D-73：裁定权在外环），不再硬编码
+            # manual_review。有人明确反对 → manual_review（分歧未决）；无人反对 → conditional
+            # （一致认为方向可行、需先满足条件）。见 D-95 的两层判定。
+            _, _, status = consensus_fn(state.latest, state.weights, final=True)
             result.warnings.append("max_rounds_reached")
 
         # --- 收束 act：达标/停滞 → finalize，未达共识 → ask_human（§5.4.1） --- #
