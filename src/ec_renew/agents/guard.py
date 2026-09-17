@@ -345,13 +345,22 @@ class Guard:
         )
 
     def record_evidence_request(self, payload: Mapping[str, object], *, state: LoopState) -> EvidenceRequest:
-        """登记证据请求。**只登记，不改本轮冻结基线**（D-16）。"""
+        """登记证据请求。**只登记，不改本轮冻结基线**（D-16）。
+
+        幂等：同一个 ``(scope, query)`` 只登记一次。缺口每轮都会被重新派生出来，重复登记会把
+        事件日志灌满，也会让「到底提了几次请求」失去意义。
+        """
         request = EvidenceRequest(
             query=str(payload.get("query", "")),
             reason=str(payload.get("reason", "")),
             scope=str(payload.get("scope", "cases")),  # type: ignore[arg-type]
             effective_round=max(state.round_no + 1, int(payload.get("effective_round", 0) or 0)),
         )
+        if any(
+            known.scope == request.scope and known.query == request.query
+            for known in self._requests
+        ):
+            return request
         self._requests.append(request)
         self._ctx.events.emit(
             "evidence_requested",

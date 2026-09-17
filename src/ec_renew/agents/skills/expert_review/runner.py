@@ -151,17 +151,30 @@ def parse_opinion(expert: str, raw: str, allowed_ids: Sequence[str]) -> ExpertOp
         for c in opinion.claims
         if all(eid in allowed for eid in c.evidence_ids)
     ]
+
+    # 服务端判定弃权来源（D-93）：模型自报的弃权一律算**判断性弃权**（"我判断我无法结论"，
+    # 这是一次交付）。**不采信模型自填的 `abstain_kind`**——它是 quorum 的判据，不能由被测量
+    # 的对象自己填写，与上面覆盖 `expert` / `discipline` 是同一条纪律。
+    opinion.abstain_kind = "judgment" if opinion.decision == "abstain" else None
     return opinion
 
 
 def abstain_opinion(expert: str, allowed_ids: Sequence[str], reason: str) -> ExpertOpinion:
-    # Bounded by construction: `reason` usually carries a raw parser message,
-    # and the abstain path must never itself raise — an exception here would
-    # turn a graceful degradation into a whole-round failure.
+    """**服务端兜底**的弃权：超时 / 传输错误 / 契约重试耗尽（D-93）。
+
+    它与「模型在契约内弃权」的区别是 quorum 的唯一判据：这一个算**缺席**（专家没交付意见），
+    那一个算**交付**。所以这里必须显式标 ``abstain_kind="execution_failure"``，而模型自报的
+    弃权由 ``parse_opinion`` 强制标成 ``judgment``——模型无法把自己伪装成缺席或反之。
+
+    Bounded by construction: `reason` usually carries a raw parser message, and the abstain
+    path must never itself raise — an exception here would turn a graceful degradation into
+    a whole-round failure.
+    """
     detail = _one_line(reason, MAX_UNCERTAINTY_CHARS) or "未知原因"
     return ExpertOpinion(
         expert=expert,
         decision="abstain",
+        abstain_kind="execution_failure",
         rationale=_one_line(f"无法完成评估：{detail}", MAX_RATIONALE_CHARS),
         evidence_ids=list(allowed_ids) or ["E-unavailable0000"],
         uncertainties=[detail],

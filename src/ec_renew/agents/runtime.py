@@ -26,6 +26,7 @@ from ..contracts import (
     META_ACTIONS,
     ActionProposal,
     AgentKind,
+    EvidenceRequest,
     ExpertOpinion,
     ExpertTask,
     GuardVerdict,
@@ -40,6 +41,7 @@ from ..errors import BudgetExceeded, InvariantViolation, StepLimitExceeded
 from ..ports import RunContext
 from .guard import Guard, LoopState
 from .memory import MemoryService
+from .meta import gap_payload
 from .skills.expert_review import abstain_opinion, run_expert
 
 
@@ -91,6 +93,7 @@ class MetaLoopResult:
     rounds: int = 0
     active: list[str] = field(default_factory=list)
     weights: dict[str, float] = field(default_factory=dict)
+    evidence_requests: list[EvidenceRequest] = field(default_factory=list)
     plans: list[object] = field(default_factory=list)
     steps: list[StepRecord] = field(default_factory=list)
 
@@ -287,6 +290,7 @@ class AgentRuntime:
         stall_fn: Callable[
             [dict[str, ExpertOpinion], dict[str, ExpertOpinion], Sequence[str], Sequence[str]], bool
         ],
+        gap_fn: Callable[[LoopState], list[EvidenceRequest]] | None = None,
     ) -> MetaLoopResult:
         """一个评审轮 = 一次 think-act-observe；``max_rounds`` 就是轮次上限本身，
         不引入第二套「元智能体步数上限」（§5.4.1）。"""
@@ -349,6 +353,24 @@ class AgentRuntime:
                     active_experts=list(state.active),
                 )
             )
+
+            # --- 证据缺口（D-94）：在 observe 阶段、**收束之前**提交 ---------- #
+            # 放在这里而不是下一轮的 think 里，是因为「全员判断性弃权」这一情形本轮就会收束
+            # （status=insufficient_evidence）——若等到下一轮再提，缺口永远交不出去。
+            # 缺口仍走 act 通道（`request_evidence`）：守卫的判据、记账与事件一条都不变。
+            if gap_fn is not None:
+                for gap in gap_fn(state):
+                    await self.act(
+                        ActionProposal(
+                            action="request_evidence",
+                            payload=gap_payload(gap),
+                            rationale=gap.reason,
+                        ),
+                        state,
+                        request=request,
+                        sub_questions=sub_questions,
+                    )
+
             if status != "retry":
                 break
 
@@ -395,6 +417,7 @@ class AgentRuntime:
         result.usage = state.usage
         result.active = list(state.active)
         result.weights = dict(state.weights)
+        result.evidence_requests = list(state.evidence_requests)
         result.plans = list(state.plans)
         result.steps = self.steps
         return result

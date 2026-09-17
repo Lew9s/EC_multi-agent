@@ -117,6 +117,9 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **专家评审是可复用技能**：方法（评审准则 + 契约 + 重试/修复/弃权）在 `agents/skills/expert_review/`，六个专家只是同一技能 + 不同 persona（D-92）
 - **判断可以基于领域通识**：本轮证据给不出技术细节时专家仍须给判断（revise/reject + 待补清单），`abstain` 只留给「超出专业范围 / 请求无法判定」（D-92）
 - **保证等级看实际依据**：每条意见声明 `basis`（evidence / knowledge / mixed），声明 knowledge 的权重占比 > 0.5 时保证等级降为 `knowledge_based`——检索命中历史 ≠ 专家用了它
+- **弃权分两类**：判断性弃权（模型说「我无法结论」）是**交付**，执行失败弃权（超时/契约耗尽）才是**缺席**；quorum 只拦后者（D-93）
+- **四种收敛状态**：`approved` 交付 / `manual_review` 分歧交人工 / `stalled` 流程已停 / `insufficient_evidence` **证据不足 → 补证据**（带结构化缺口清单，D-93）
+- **缺口清单是结构化产出**：由专家的 `uncertainties`/`constraints` 经固定词表确定性派生成 `EvidenceRequest`，进 `RunResult.evidence_requests` 与报告专节（D-94）
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）
 - **记忆读权限在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影
@@ -150,6 +153,5 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 **kernel —— 未实现**：断点续跑 / 预算熔断 / 挂起恢复。
 
 **其余未实现或未接线** —— 工具调用（L1/L2）· 分歧归因的**阈值标定**（检测与记录已落地，Q-22）·
-证据请求的**检索端**（渠道、限额、事件都已落地，但 `Retriever.search()` 未实现，故请求显式记为
-`evidence_request_unsatisfied`，见 `docs/rag.md` §9）· **后置 HITL 的交互**（`ask_human` 只登记待办，
+证据请求的**检索端**（渠道、词表派生、限额、幂等记账、事件与结构化产出都已落地，但 `Retriever.search()` 未实现，故请求显式记为 `evidence_request_unsatisfied`，见 `docs/rag.md` §9）· **后置 HITL 的交互**（`ask_human` 只登记待办，
 真正挂起要等 kernel）· 停滞/振荡阈值的标定（Q-17）· OTel · 级联检测实验
