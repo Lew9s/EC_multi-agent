@@ -349,6 +349,10 @@ class Guard:
 
         幂等：同一个 ``(scope, query)`` 只登记一次。缺口每轮都会被重新派生出来，重复登记会把
         事件日志灌满，也会让「到底提了几次请求」失去意义。
+
+        重复时返回**已登记的那个对象**（而不是新建一个等值副本）：调用方（runtime）与回填路径
+        （:meth:`mark_evidence_request_satisfied`）必须看到同一份状态，否则「这条请求回填了没」
+        会在两个视图里给出相反答案。
         """
         request = EvidenceRequest(
             query=str(payload.get("query", "")),
@@ -356,11 +360,9 @@ class Guard:
             scope=str(payload.get("scope", "cases")),  # type: ignore[arg-type]
             effective_round=max(state.round_no + 1, int(payload.get("effective_round", 0) or 0)),
         )
-        if any(
-            known.scope == request.scope and known.query == request.query
-            for known in self._requests
-        ):
-            return request
+        for known in self._requests:
+            if known.scope == request.scope and known.query == request.query:
+                return known
         self._requests.append(request)
         self._ctx.events.emit(
             "evidence_requested",
@@ -369,6 +371,43 @@ class Guard:
             scope=request.scope,
         )
         return request
+
+    def due_evidence_requests(self, round_no: int) -> list[EvidenceRequest]:
+        """本轮**应当回填**的请求：已到生效轮次、且从未被尝试过（D-97）。
+
+        只读视图。真正的登记由 :meth:`mark_evidence_request_satisfied` 完成——守卫是全局状态的
+        唯一写者（D-71），检索 I/O 则留在外环。
+
+        已尝试过的不再重复取：重复取会白付 embedding 与图查询的费用，而 content-addressed 的
+        registry 也不会因此多出一条证据（同一内容永远映射到同一个 ``evidence_id``）。
+        """
+        return [
+            request
+            for request in self._requests
+            if request.effective_round <= round_no and request.satisfied_round is None
+        ]
+
+    def mark_evidence_request_satisfied(
+        self, request: EvidenceRequest, *, round_no: int, hits: int, new_ids: Sequence[str]
+    ) -> None:
+        """记录「这条缺口在第 ``round_no`` 轮被尝试回填了」+ 落事件（D-97）。
+
+        ``hits`` 与 ``new_ids`` **必须分开记**：真实 run 里出现过「命中 3 条、新增 0 条」（检索
+        返回的还是第 1 轮那几条），那时 ``new_ids`` 为空、``hits`` 不为零——它说明**缺口不靠新
+        检索补齐**（该补的是语料），与「语料里压根没有」（``hits == 0``）不是同一回事，也与
+        「没去查」（``satisfied_round is None``）不是同一回事。因此 ``satisfied_round`` 记的是
+        **尝试**，不是**成功**。
+        """
+        request.satisfied_round = round_no
+        request.satisfied_hits = hits
+        request.satisfied_evidence = sorted(set(new_ids))
+        self._ctx.events.emit(
+            "evidence_refilled",
+            round=round_no,
+            scope=request.scope,
+            hits=hits,
+            new=len(request.satisfied_evidence),
+        )
 
     def attribute(self, *, state: LoopState) -> AttributionProposal:
         """分歧归因：**确定性**算证据重叠，产出提案（Q-22：先记录、不驱动补救）。"""

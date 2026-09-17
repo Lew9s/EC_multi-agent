@@ -49,6 +49,7 @@ from .contracts import (
     RunResult,
     SubQuestion,
 )
+from .errors import PermanentExternalError, TransientError
 from .ports import RunContext as _RunContext
 
 MAX_QUERIES = 5
@@ -129,20 +130,7 @@ async def prefetch_baseline(
     bundle = EvidenceBundle(round=0)
     if ctx.retriever is not None:
         bundle = await ctx.retriever.prefetch(intent.query_set, top_k)
-        # The registry owns ids (content-addressed). Retriever-side ids are
-        # only labels, so remap them here to keep one source of truth.
-        remapped: list[EvidenceMeta] = []
-        for item in bundle.items:
-            registered = ctx.registry.register(
-                source=item.source,
-                content=item.content or item.evidence_id,
-                entity_keys=item.entity_keys,
-                disciplines=item.disciplines,
-                group_keys=item.group_keys,
-                score=item.score,
-            )
-            remapped.append(item.model_copy(update={"evidence_id": registered.evidence_id}))
-        bundle = bundle.model_copy(update={"items": remapped})
+        bundle = bundle.model_copy(update={"items": register_items(ctx, bundle.items)})
     bundle.baseline_ids = ctx.registry.all_ids()
     ctx.events.emit(
         "baseline_frozen",
@@ -150,6 +138,96 @@ async def prefetch_baseline(
         warnings=list(bundle.warnings),
     )
     return bundle
+
+
+def register_items(ctx: _RunContext, items: Sequence[EvidenceMeta]) -> list[EvidenceMeta]:
+    """把检索结果登记进 registry，并把检索端 id 重映射成 registry 的 id。
+
+    **registry 拥有 id**（content-addressed）：检索端的 id 只是标签。这条规则对 `prefetch` 与
+    缺口回填（D-97）两条路径都必须成立，否则同一份内容会带着两个 id 在系统里流动，「事实可
+    回溯」立刻失效——所以这里是**唯一实现**，而不是两段长得差不多的代码。
+    """
+    remapped: list[EvidenceMeta] = []
+    for item in items:
+        registered = ctx.registry.register(
+            source=item.source,
+            content=item.content or item.evidence_id,
+            entity_keys=item.entity_keys,
+            disciplines=item.disciplines,
+            group_keys=item.group_keys,
+            score=item.score,
+        )
+        remapped.append(item.model_copy(update={"evidence_id": registered.evidence_id}))
+    return remapped
+
+
+async def refill_evidence(
+    round_no: int,
+    *,
+    guard: Guard,
+    ctx: _RunContext,
+    bundle: EvidenceBundle,
+    top_k: int,
+) -> list[str]:
+    """缺口回填（**D-97**，把 §5.2.4 的「下一轮基线上扩」真正接上）。
+
+    把「已到生效轮次、且从未被尝试过」的证据请求，用它们**自己的确定性 query**（D-94 生成的
+    模板，不是模型原文）再检索一次，登记进 registry，并合并进外环持有的 ``bundle``。
+
+    **必须在同一轮的 ``dispatch_experts`` 之前执行**：守卫的 ``dispatch()`` 用
+    ``registry.all_ids()`` 冻结本轮基线（`guard.py` 里那句注释早就写明了这一点），因此在这里
+    登记的证据会被本轮**所有**专家同时看到，而不是只有提请求的那位。
+
+    一条请求一次检索（而不是把 query 合并成一批）：`EvidenceBundle` 不带「哪条命中来自哪条
+    query」，合并调用就无法回答「这条缺口到底补到了什么」——而那个答案正是缺口闭环的审计凭据。
+    代价是每轮最多 ``MAX_GAP_REQUESTS`` 次本地检索，换到的是逐条归因。
+
+    失败**不静默**（P5）：只接住已翻译、可降级的异常（``InvariantViolation`` 是引擎写错，
+    永不捕获），落事件并让这条请求保持「未满足」，终局如实汇报。
+    """
+    pending = guard.due_evidence_requests(round_no)
+    if not pending:
+        return []
+    if ctx.retriever is None:
+        ctx.events.emit(
+            "evidence_refill_skipped", round=round_no, reason="no_retriever", count=len(pending)
+        )
+        return []
+
+    known = {item.evidence_id for item in bundle.items}
+    added: list[str] = []
+    for request in pending:
+        try:
+            fetched = await ctx.retriever.prefetch([request.query], top_k)
+        except (TransientError, PermanentExternalError) as exc:
+            ctx.events.emit(
+                "evidence_refill_failed",
+                round=round_no,
+                scope=request.scope,
+                error=type(exc).__name__,
+            )
+            continue
+        before = set(ctx.registry.all_ids())
+        items = register_items(ctx, fetched.items)
+        # 「命中几条」与「新增几条」必须分开记（真实 run 里出现过命中 3 条 / 新增 0 条）：
+        # 前者说检索有没有找到东西，后者说本轮基线有没有真的变大。
+        new_ids = [item.evidence_id for item in items if item.evidence_id not in before]
+        for item in items:
+            if item.evidence_id not in known:
+                bundle.items.append(item)
+                known.add(item.evidence_id)
+        added.extend(new_ids)
+        bundle.warnings = list(bundle.warnings) + [
+            w for w in fetched.warnings if w not in bundle.warnings
+        ]
+        guard.mark_evidence_request_satisfied(
+            request, round_no=round_no, hits=len(items), new_ids=new_ids
+        )
+    bundle.baseline_ids = ctx.registry.all_ids()
+    ctx.events.emit(
+        "evidence_refill_done", round=round_no, requests=len(pending), new_ids=len(added)
+    )
+    return added
 
 
 def assess_grounding(bundle: EvidenceBundle) -> Grounding:
@@ -413,6 +491,33 @@ def detect_oscillations(
 # --------------------------------------------------------------------------- #
 
 
+def gap_outcome(gap: EvidenceRequest) -> str:
+    """一条证据请求的终局（D-97）。**四种状态互不相同**，不能糊成一句：
+
+    * 未回填 —— 没有检索端，或请求在最后一轮才提出（``effective_round`` 已超出 ``max_rounds``）；
+    * 已检索、语料未命中 —— 库里确实没有这条证据；
+    * 已检索、命中的都已在本轮基线中 —— **缺口不靠新检索补齐，该补的是语料**（真实 run 的
+      实测形态：命中 3 条、基线新增 0 条）；
+    * 已回填 —— 附上真正让基线变大的条数。
+
+    第三与第四种曾被合成一句「已回填 N 条」（用的是命中数），于是「什么都没变」被写成了
+    「补到了 3 条」——**正好说反**。这正是把 hits 与 new 分成两个字段的原因。
+    """
+    if gap.satisfied_round is None:
+        return "未回填（无检索端，或轮次已用尽）"
+    if gap.satisfied_hits == 0:
+        return f"第 {gap.satisfied_round} 轮已检索，语料未命中"
+    if not gap.satisfied_evidence:
+        return (
+            f"第 {gap.satisfied_round} 轮已检索：命中 {gap.satisfied_hits} 条，"
+            "但都已在本轮基线中（缺口不靠新检索补齐，需补语料）"
+        )
+    return (
+        f"第 {gap.satisfied_round} 轮已回填 {len(gap.satisfied_evidence)} 条新证据"
+        f"（命中 {gap.satisfied_hits} 条）"
+    )
+
+
 def render_markdown(
     *,
     request: str,
@@ -481,13 +586,13 @@ def render_markdown(
 
     if evidence_requests:
         # 缺口清单第一次进入**结构化契约**（RunResult.evidence_requests），报告里也要看得见：
-        # 「缺什么」是这次评审最可执行的产出，不该只沉在 uncertainties 的散文里（D-94）。
+        # 「缺什么」是这次评审最可执行的产出（D-94）。回填结果同样是结论（D-97）——
+        # 「已回填」「查了但没有」「没去查」三种状态必须分得开，否则接手的人会把「语料里没有」
+        # 当成「没人管」。
         lines.append("## 需要补充的证据")
         lines.append("")
         for gap in evidence_requests:
-            lines.append(f"- [{gap.scope}] {gap.query}")
-        lines.append("")
-        lines.append("（检索端 `RetrieverPort.search()` 尚未实现：以上请求已登记，落地后即刻生效。）")
+            lines.append(f"- [{gap.scope}] {gap.query} —— {gap_outcome(gap)}")
         lines.append("")
     return "\n".join(lines)
 
@@ -609,23 +714,63 @@ async def run(
         reason_fn=partial(manual_review_reason, min_effective=min_effective),
         # 证据缺口由专家写好的待补清单确定性派生（D-94），在 observe 阶段经 act 通道提交。
         gap_fn=partial(skeleton.gaps, request=intent.normalized_request),
+        # 缺口回填（D-97）同样是外环的事：检索 I/O 与 registry 写入都不属于内环。注入的是
+        # 一个「按轮次回填」的回调，内环只知道「每轮开始前有一件外环要做的准备工作」。
+        refill_fn=partial(refill_evidence, guard=guard, ctx=ctx, bundle=bundle, top_k=top_k),
         stall_fn=detect_stall,
     )
     warnings.extend(loop.warnings)
     stall = loop.stall
 
-    # 证据请求：管道已通，但检索端口还没有 `search()`（docs/rag.md §9 的双接口只实现了
-    # prefetch）。**不静默**：显式标注未满足并落事件（P5）。
-    if guard.evidence_requests:
-        if hasattr(ctx.retriever, "search"):
-            ctx.events.emit("evidence_request_deferred", count=len(guard.evidence_requests))
-        else:
-            warnings.append("evidence_request_unsatisfied")
-            ctx.events.emit(
-                "degradation",
-                level="evidence_request",
-                reason="检索端口未实现 search()，本轮证据请求无法满足（docs/rag.md §9）",
-            )
+    # 缺口回填的**逐条**结论（D-97）。此前这里只有一个 run 级警告，还挂在
+    # `hasattr(ctx.retriever, "search")` 上——那个探测既不代表请求被满足，也把「没去查」和
+    # 「查了没有」混成一句话（`search()` 是 agent 侧的自主检索通道，与缺口回填不是同一条路，
+    # 见 Q-28）。
+    unresolved = [r for r in guard.evidence_requests if r.satisfied_round is None]
+    no_hit = [
+        r
+        for r in guard.evidence_requests
+        if r.satisfied_round is not None and r.satisfied_hits == 0
+    ]
+    # 第三种形态：检索命中了东西，但全都早就在本轮基线里（真实 run 的实测结果）。它与
+    # 「语料里没有」的补救动作不同——**要补的是语料，不是再检索**，所以必须单独报出来。
+    known_only = [
+        r
+        for r in guard.evidence_requests
+        if r.satisfied_round is not None
+        and r.satisfied_hits > 0
+        and not r.satisfied_evidence
+    ]
+    if unresolved:
+        warnings.append("evidence_request_unsatisfied")
+        ctx.events.emit(
+            "degradation",
+            level="evidence_request",
+            reason=(
+                f"{len(unresolved)} 条证据请求到 run 结束仍未回填"
+                "（无检索端，或请求在最后一轮才提出、已无下一轮可用）"
+            ),
+        )
+    if no_hit:
+        # 与上一条**分开**：语料里没有这条证据，是结论，不是故障（P5）。
+        warnings.append("evidence_request_no_hit")
+        ctx.events.emit("evidence_request_no_hit", count=len(no_hit))
+    if known_only:
+        warnings.append("evidence_request_known_only")
+        ctx.events.emit("evidence_request_known_only", count=len(known_only))
+
+    # 回填会改变**终局**的依据等级：第 1 轮没命中历史案例、第 2 轮靠缺口回填补上了，报告就不该
+    # 继续写「仅基于规范与通用工程知识」（§5.7 的等级是交付物上的一句话，必须与实际证据一致）。
+    # **不追溯**改变入口的门禁判定 —— 那个决定基于第 1 轮基线做出、HITL 成本也已经付了。
+    reassessed = assess_grounding(bundle)
+    if reassessed.basis != grounding.basis:
+        ctx.events.emit(
+            "grounding_reassessed",
+            before=grounding.basis,
+            after=reassessed.basis,
+            items=len(bundle.items),
+        )
+    grounding = reassessed
 
     # --- stage 4：循环已由 AgentsRuntime 执行，见中段 --------------------- #
 
@@ -658,7 +803,9 @@ async def run(
         rounds=loop.rounds,
         evidence_gists=evidence_gists,
         oscillation=stall.reversals,
-        evidence_requests=loop.evidence_requests,
+        # 守卫的清单是**权威**的（按 `(scope, query)` 去重，且携带回填结果）；runtime 的清单是
+        # 内环自己的记账，两者在去重路径上会分叉（同一缺口每轮都会重新派生一次）。
+        evidence_requests=guard.evidence_requests,
         conditions=conditions,
         review_reason=loop.review_reason,
     )
@@ -712,7 +859,7 @@ async def run(
         consensus_status=loop.status,  # type: ignore[arg-type]
         review_reason=loop.review_reason,  # type: ignore[arg-type]
         stall=stall,
-        evidence_requests=loop.evidence_requests,
+        evidence_requests=guard.evidence_requests,
         conditions=conditions,
         grounding=grounding,
         assurance=assurance,

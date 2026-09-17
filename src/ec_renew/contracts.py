@@ -703,13 +703,24 @@ class GuardVerdict(BaseModel):
 
 
 class EvidenceRequest(BaseModel):
-    """事实性检索请求（agent → 守卫）。只能在**下一轮**生效（D-16）。"""
+    """事实性检索请求（agent → 守卫）。只能在**下一轮**生效（D-16 / D-97）。"""
 
     expert: str = "meta"
     query: str
     reason: str
     scope: Literal["components", "departments", "cases", "standards"] = "cases"
     effective_round: int = 0
+    #: 回填**尝试**发生的轮次（D-97）。``None`` = 到本次 run 结束都没有被尝试过（没有检索端，
+    #: 或请求提出得太晚、轮次已用尽）。这是**每条请求各自**的结论——此前只有一个 run 级的
+    #: `evidence_request_unsatisfied` 警告，分不出是哪一条没兑现、也分不出「没查」和「没查到」。
+    satisfied_round: int | None = None
+    #: 回填检索**命中**的条数（**含早已在本轮基线里的**）。与 ``satisfied_evidence`` 分开是必须的：
+    #: 真实 run 里出现过「命中 3 条、新增 0 条」——那说明缺口靠现有语料补不上（该补的是语料，
+    #: 不是再检索），把两者合成一个数字就会把它读成「已回填 3 条」，正好相反。
+    satisfied_hits: int = 0
+    #: 回填时**新登记**进 registry 的 ``evidence_id``：只有这些真正让本轮基线变大。空列表是合法
+    #: 且有意义的结论（语料里没有 / 命中的都已知道），不是失败。缺口闭环的审计凭据。
+    satisfied_evidence: list[str] = Field(default_factory=list)
 
 
 class AttributionProposal(BaseModel):

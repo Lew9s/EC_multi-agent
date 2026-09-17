@@ -447,15 +447,26 @@ def test_meta_rationale_never_reaches_a_sub_agent_prompt() -> None:
     assert not any("规则骨架" in prompt for prompt in prompts)
 
 
-def test_an_evidence_request_is_reported_unsatisfied() -> None:
-    """管道已通但 `search()` 未实现 —— 必须显式标注，不能静默（P5）。"""
-    guard, ctx = _guard()
+def test_an_evidence_request_takes_effect_in_the_next_round() -> None:
+    """D-16 / D-97：请求只能在**下一轮**生效，且在被回填之前一直处于「待满足」。
+
+    此前这条用例的前提是「检索端口没有 `search()`」——那既不是「请求被满足」的判据，也把
+    「没去查」与「查了没有」混为一谈。缺口回填（D-97）之后，判据落在请求自己的字段上。
+    """
+    guard, _ctx = _guard()
     state = LoopState(round_no=2)
-    # 直接登记一条请求，模拟骨架在「归因=证据不同」时提的请求。
-    guard.record_evidence_request(
+    request = guard.record_evidence_request(
         {"query": "FR36 焊接案例", "reason": "缺同类案例", "scope": "cases", "effective_round": 3},
         state=state,
     )
 
-    assert guard.evidence_requests[0].effective_round == 3
-    assert not hasattr(ctx.retriever, "search"), "前提：检索端口还没有 search()"
+    assert request.effective_round == 3
+    assert guard.evidence_requests[0] is request, "重复登记必须返回同一个对象，否则状态会分叉"
+    assert guard.due_evidence_requests(2) == [], "还没到生效轮次"
+    assert guard.due_evidence_requests(3) == [request]
+
+    guard.mark_evidence_request_satisfied(request, round_no=3, hits=2, new_ids=["E-aaa"])
+    assert request.satisfied_round == 3
+    assert request.satisfied_hits == 2
+    assert request.satisfied_evidence == ["E-aaa"]
+    assert guard.due_evidence_requests(4) == [], "已尝试过的不再重复取（幂等，省一次检索）"

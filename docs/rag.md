@@ -293,8 +293,9 @@ python -m ec_renew.interface.cli --offline -r "..."        # 全离线（FakeLLM
 
 | 项 | 说明 |
 | --- | --- |
-| `search()`（agent 工具侧） | design.md D-11 的双接口只实现了 `prefetch()`。当前专家是 L0（单次调用），还没有 L1/L2 的自主补检索，所以 `search()` 尚无调用方。`EvidenceRegistry` 已就位，补上时无需改结构。 |
-| 证据请求通道 | `EvidenceRequest` 未实现；轮次基线目前不中途扩张（`memory.py` 里已有注释）。 |
+| `search()`（agent 工具侧） | design.md D-11 的双接口只实现了 `prefetch()`。当前专家是 L0（单次调用），还没有 L1/L2 的自主补检索，所以 `search()` 尚无调用方。`EvidenceRegistry` 已就位，补上时无需改结构。**是否要做，见 Q-28**（悬着本身是负债：契约写着双接口、端口只有一个方法）。 |
+| 证据请求通道（**上报**侧） | **已完成**（D-94）：专家写的待补清单被确定性派生成 `EvidenceRequest`，经 act 通道登记进 `RunResult.evidence_requests`，幂等、可复算。 |
+| 证据请求通道（**回填**侧） | **已完成**（D-97）：外环在每轮派发之前用缺口自己的确定性 query 重跑 `prefetch`，登记进 registry，本轮冻结基线因此可能包含新证据且全体专家可见。请求分开记 `satisfied_hits`（命中）与 `satisfied_evidence`（真正新增），终局分**四态**汇报：未回填 / 语料未命中 / 命中的都已在本轮基线中 / 已回填新证据。**此前这一侧是缺的**：轮次基线根本不中途扩张，请求只能记未满足。真实 run 实测（`run_id=606472b6c985`）：3 条请求全部「命中 3 条、新增 0 条」→ 基线 4→4→4 零增量，警告 `evidence_request_known_only`——**当前语料下缺口补不进新证据，该补的是语料**。 |
 | 增量摄取 | 目前是全量重跑（MERGE 幂等）。语料规模上来后需要按文件哈希跳过未变文档。 |
 | 真实 embedding 的阈值校准 | **已完成**：`VECTOR_MIN_SCORE=0.35`，基于 36 条标注 query 实测（见 §6.1）。样本量不大，换语料/换模型后需重标。 |
 | 智谱通道的真机联调 | **已完成**：真实 API 联调通过（`embedding-3` 返回 2048 维）。请求形状、批内乱序重排、429/5xx 重试与异常翻译另有 `httpx.MockTransport` 测试覆盖（`test_zhipu_*`）。 |

@@ -121,7 +121,7 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **三个收敛状态，只回答「交付还是交人」**（D-82/D-96）：`approved` 交付 / `manual_review` 交人裁定 / `stalled` 流程已停（不动点）
 - **「因为什么交人」是独立字段**：`RunResult.review_reason` ∈ `quorum`（有人没交出意见）/ `disagreement`（有人明确反对）/ `conditions_only`（无人反对但支持度不足以自动交付，附 `conditions`）/ `evidence_gap`（全员判断证据不足，附缺口清单）；报告里有一行「交人原因」（D-96）
 - **判定分两层**：是否收敛（结构化规则，决定要不要继续迭代）与停止时如何分类（交付 / 交人）分开；`共识分` 降为**描述性支持度**，不再单独决定判定（D-95）
-- **缺口清单是结构化产出**：由专家的 `uncertainties`/`constraints` 经固定词表确定性派生成 `EvidenceRequest`，进 `RunResult.evidence_requests` 与报告专节（D-94）
+- **缺口清单是结构化产出，且真的会被回填**（D-94/D-97）：专家的 `uncertainties`/`constraints` 经固定词表确定性派生成 `EvidenceRequest`；外环在下一轮**派发之前**用缺口自己的 query 重跑检索并登记，本轮基线因此可能含新证据且**全体专家可见**；请求分开记 `satisfied_hits`（命中）与 `satisfied_evidence`（真正新增），报告分**四态**：未回填 / 语料未命中 / 命中的都已在本轮基线中（**该补语料**）/ 已回填新证据
 - **有界自主性**：专家一律 L0（单次调用 + JSON 输出），不依赖 provider 的 tool calling
 - **Delphi 式两轮共识**：第 1 轮完全隔离；第 2 轮仅披露**匿名 claim**（不含身份与完整论证）
 - **记忆读权限在元智能体**：子 agent 无独立存储，上下文由 `MemoryService.project()` 确定性投影

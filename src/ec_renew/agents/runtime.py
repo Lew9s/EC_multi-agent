@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from ..contracts import (
@@ -211,9 +211,12 @@ class AgentRuntime:
             state.usage = state.usage + spent
             produced = sorted(opinions)
         elif proposal.action == "request_evidence":
-            state.evidence_requests.append(
-                self._guard.record_evidence_request(proposal.payload, state=state)
-            )
+            # 守卫对同一个 (scope, query) 幂等，并**返回已登记的那个对象**；这里也按对象去重，
+            # 否则同一缺口每轮重新派生一次，`MetaLoopResult.evidence_requests` 会堆出重复条目
+            # （真实 run 里出现过同一 query 带三个不同 effective_round 的记录）。
+            recorded = self._guard.record_evidence_request(proposal.payload, state=state)
+            if recorded not in state.evidence_requests:
+                state.evidence_requests.append(recorded)
         elif proposal.action == "attribute":
             state.attributions.append(self._guard.attribute(state=state))
         elif proposal.action == "ask_human":
@@ -293,6 +296,7 @@ class AgentRuntime:
         ],
         gap_fn: Callable[[LoopState], list[EvidenceRequest]] | None = None,
         reason_fn: Callable[[dict[str, ExpertOpinion]], str] | None = None,
+        refill_fn: Callable[[int], Awaitable[None]] | None = None,
     ) -> MetaLoopResult:
         """一个评审轮 = 一次 think-act-observe；``max_rounds`` 就是轮次上限本身，
         不引入第二套「元智能体步数上限」（§5.4.1）。"""
@@ -308,6 +312,14 @@ class AgentRuntime:
         for round_no in range(1, max_rounds + 1):
             state.round_no = round_no
             result.rounds = round_no
+
+            # --- 缺口回填（D-97）：**必须在本轮派发之前** -------------------- #
+            # 派发会用「当前 registry 的内容」冻结本轮基线，因此外环在这里登记的证据会被本轮
+            # **所有**专家同时看到（§5.2.4 要求的「下一轮基线上扩，所有人可见」）。放到派发之后
+            # 就晚了一轮，放到下一轮 think 里就更晚——「全员判断性弃权」那种情形本轮就收束了。
+            # 与共识/停滞一样由外环注入（D-73）：内环不知道「检索」这回事，只按顺序调用。
+            if refill_fn is not None:
+                await refill_fn(round_no)
 
             # --- think（§5.4.1：读骨架 + 记忆视图 → 定激活集与证据分配） ---
             think_step = self._step(

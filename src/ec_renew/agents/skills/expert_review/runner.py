@@ -97,6 +97,18 @@ def render_task(task: ExpertTask) -> str:
                 f"持保留意见的专家数：{feedback.dissent_count}\n"
                 "请基于上述反馈与本轮证据，重新评估你是否维持原判断。"
             )
+        # 缺口回填（D-97）会真的中途扩张基线，专家必须知道**哪几条是新的**：否则第 2 轮只是
+        # 把更大的一堆证据再喂一遍，修正意见就成了无源之水。空集时给一句**定值**文案——基线
+        # 没变时两轮 prompt 仍然逐字相同，§5.4.4 的不动点论证与 `stalled` 判据都不受影响。
+        new_ids = task.revision.new_evidence_ids
+        parts.append(
+            "## 本轮新增证据\n"
+            + (
+                "\n".join(f"- {eid}" for eid in new_ids)
+                if new_ids
+                else "（无：本轮基线与上一轮相同）"
+            )
+        )
 
     parts.append("## 输出\n只输出一个 JSON 对象。")
     return "\n\n".join(parts)

@@ -244,9 +244,13 @@ class MemoryService:
 
         revision: RevisionContext | None = None
         if previous is not None:
+            # 「本轮比上一轮多了哪几条证据」由两次冻结基线相减**确定性**得出（D-97）。缺口回填
+            # 现在真的会中途扩张基线，专家必须知道哪几条是新的——否则第 2 轮只是把同一批证据
+            # 再喂一遍，而修正意见却要为此负责（D-81 的「无信息增益」也正需要这个差集来描述）。
+            new_ids = sorted(set(baseline_ids) - set(self._reg.baseline(round_no - 1)))
             revision = RevisionContext(
                 own_previous=previous,
-                new_evidence_ids=[],  # demo: baseline does not expand mid-run
+                new_evidence_ids=new_ids,
                 feedback=ReviewFeedback(
                     round=round_no,
                     consensus_score=consensus_score,
