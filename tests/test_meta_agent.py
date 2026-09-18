@@ -4,7 +4,7 @@
 
 1. **动作空间是闭集**，且每轮的载荷键也都是闭集（D-75：分发通道零自由文本）；
 2. **守卫是唯一写者**，它的每条判据都有对照用例（§12 1c）；
-3. **ActivationPlan 有生产者也有消费者**（它此前是零生产者零消费者的死契约）；
+3. **ActivationPlan 有生产者也有消费者**（否则它只是写在类型里的空承诺）；
 4. **StepRecord 在执行前落盘**（§9.4 / D-85，kernel 的前置 seam）。
 """
 
@@ -355,7 +355,7 @@ def test_finalize_accepts_a_supported_opinion() -> None:
 
 
 def test_activation_plan_has_a_producer_and_a_consumer() -> None:
-    """这份契约此前是「零生产者零消费者」的死契约（README v2 的原话）。"""
+    """这份契约必须同时有生产者与消费者——否则它只是写在类型里的空承诺。"""
     guard, ctx = _guard()
     baseline = ctx.registry.all_ids()
 

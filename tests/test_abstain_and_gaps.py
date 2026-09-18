@@ -4,8 +4,8 @@
 
 1. **判断性弃权是一次交付**（算「有效专家」），只有执行失败才是缺席 —— quorum 只该拦后者；
 2. 弃权来源由**服务端**判定，模型无法把自己伪装成缺席或反之；
-3. 全员判断性弃权 → `manual_review` + `review_reason="evidence_gap"`（D-96 之前是独立状态
-   `insufficient_evidence`），且 `assurance` **不得**声称 `history_backed`；
+3. 全员判断性弃权 → `manual_review` + `review_reason="evidence_gap"`，且 `assurance`
+   **不得**声称 `history_backed`；
 4. 证据缺口由专家写好的待补清单**确定性派生**，模型原文永不进 query。
 """
 
@@ -62,7 +62,7 @@ def test_judgment_abstain_is_a_delivery_not_an_absence() -> None:
 
     assert effective == 4, "判断性弃权必须计入「已交付」"
     assert score == 0.0
-    # 终态是「交人」，原因才是「证据缺口」——D-96 把这两件事拆开了（此前是独立状态值）。
+    # 终态是「交人」，原因才是「证据缺口」——D-96 把这两件事拆开。
     assert status == "manual_review"
     assert manual_review_reason(opinions, min_effective=3) == "evidence_gap"
 
@@ -86,7 +86,7 @@ def test_execution_failure_abstain_is_still_an_absence() -> None:
 
 
 def test_a_mixed_round_is_not_an_evidence_gap() -> None:
-    """有人给了判断 → 走原来的路（按分数判），不是证据缺口。"""
+    """有人给了判断 → 走常规判据（按分数判），不是证据缺口。"""
     weights = {expert: 1 / 3 for expert in EXPERT_IDS[:3]}
     opinions = {
         "E01": ExpertOpinion(expert="E01", decision="revise", evidence_ids=[EID]),
@@ -195,12 +195,12 @@ def test_recording_the_same_gap_twice_is_idempotent() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4) 端到端：全员弃权的那次真实故障形态
+# 4) 端到端：全员判断性弃权
 # --------------------------------------------------------------------------- #
 
 
 class _AbstainingLLM:
-    """每次都给「判断性弃权 + 待补清单」——复现真实 run 里 4 位专家全弃权的形态。"""
+    """每次都给「判断性弃权 + 待补清单」：全员弃权的形态。"""
 
     async def complete(
         self,
@@ -229,8 +229,8 @@ class _AbstainingLLM:
 
 
 def test_an_all_abstain_run_reports_the_gap_instead_of_absent_experts() -> None:
-    """真实 run 的故障形态：以前报 `manual_review`（像专家缺席），现在终态仍是 `manual_review`
-    但**原因**是证据缺口，并且交出缺口清单（D-93 的分类 + D-96 的原因标签）。"""
+    """全员判断性弃权的终态是 `manual_review`，但**原因**是证据缺口而不是专家缺席，
+    并且要交出缺口清单（D-93 的分类 + D-96 的原因标签）。"""
     ctx = RunContext(
         run_id="all-abstain",
         llm=_AbstainingLLM(),  # type: ignore[arg-type]

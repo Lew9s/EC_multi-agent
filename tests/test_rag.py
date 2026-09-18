@@ -91,7 +91,7 @@ def test_corpus_parses_every_change_order() -> None:
     # 48 = 32 个多成员变更组（E-10-1..E-10-5）+ 16 个本身就是主单号的单例
     # （H-01、H-06…）。单例必须留在自己的组里，不能被错误地并进 "H"。
     assert stats["groups"] == 48
-    # 与旧实现（另一套图谱）的计数一致：说明解析没有丢字段。
+    # 89 个组件与既有图谱的计数一致：说明解析没有丢字段。
     assert stats["components"] == 89
 
 

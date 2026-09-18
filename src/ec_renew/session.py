@@ -25,10 +25,10 @@ def summarize(result: RunResult, *, turn: int) -> TurnSummary:
     """Structured turn delta for the session accumulator (§8.4.6 / §8.4.7).
 
     Built from **fields**, deliberately not from the rendered conclusion: that
-    text opens with a constant title, so taking its first line — which is what
-    the CLI used to do — stored the same string on every turn and the session
-    ended up remembering nothing. No LLM is involved, so the summary cannot
-    drift; that is the whole point of §8.4.7's "structured summary".
+    text opens with a constant title, so a first-line summary would be the same
+    string on every turn and the session would end up remembering nothing. No
+    LLM is involved, so the summary cannot drift; that is the whole point of
+    §8.4.7's "structured summary".
 
     ``open_threads`` carries the run's warning codes verbatim. They are what the
     next turn would actually have to pick up (``max_rounds_reached`` is an

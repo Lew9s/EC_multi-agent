@@ -242,8 +242,8 @@ class AgentRuntime:
     ) -> tuple[ExpertOpinion, Usage]:
         """Expected failures become values; fatal errors stay exceptions.
 
-        与重构前逐字等价：超时/传输错误在这里变成 ``abstain`` **值**，TaskGroup 因此
-        看不到它，兄弟专家得以跑完（§7.6）。
+        超时/传输错误在这里变成 ``abstain`` **值**，TaskGroup 因此看不到它，
+        兄弟专家得以跑完（§7.6）。
         """
         step = self._step(node=f"expert:{task.expert}", round_no=task.round, kind="llm")
         try:
@@ -443,9 +443,8 @@ class AgentRuntime:
             previous_baseline = list(state.baseline)
 
         if status == "retry":
-            # 轮次耗尽仍未收敛：**终态由外环的裁定函数给出**（D-73：裁定权在外环），不再硬编码
-            # manual_review。D-96 之后第 2 层只有交付/交人两个出口，「因为什么交人」由下面的
-            # `reason_fn` 单独判定。
+            # 轮次耗尽仍未收敛：**终态由外环的裁定函数给出**（D-73：裁定权在外环）。
+            # 第 2 层只有交付/交人两个出口，「因为什么交人」由下面的 `reason_fn` 单独判定。
             _, _, status = consensus_fn(state.latest, state.weights, final=True)
             result.warnings.append("max_rounds_reached")
 

@@ -1,9 +1,8 @@
 """§12 1f — machine-readable call context travels **out of band**.
 
-Lifting ``[[CTX …]]`` out of the prompt is only safe if the context still reaches
-the two places that need it: the cache key and the fake adapter. These tests pin
-both, plus the property the fixed-point argument actually rests on — that the
-round counter no longer changes the prompt at all.
+The context must reach the two places that need it: the cache key and the fake
+adapter. These tests pin both, plus the property the fixed-point argument rests
+on — that the round counter does not change the prompt at all.
 """
 
 from __future__ import annotations
@@ -20,13 +19,13 @@ from ec_renew.llm import DeepSeekLLM, FakeLLM, LLMCache
 
 #: A plausible evidence id — deliberately **not** a run of sequential digits.
 #: The secret scanner's exact-value judgement compares against the *local* .env,
-#: whose legacy NEO4J_PASSWORD is eight digits long; a sequential literal
+#: whose NEO4J_PASSWORD is eight digits long; a sequential literal
 #: contains it verbatim and turns the secret gate red on a test fixture.
 EID = "E-9c4b1e7a2f03"
 
 
 # --------------------------------------------------------------------------- #
-# The producer — the prompt no longer carries the header
+# The producer — the prompt carries no header
 # --------------------------------------------------------------------------- #
 
 
@@ -46,7 +45,8 @@ def test_the_round_counter_no_longer_changes_the_prompt() -> None:
 
 
 def test_the_prompt_contains_no_ctx_header() -> None:
-    """Guards against the header being reintroduced "just for the fake adapter"."""
+    """The CTX header must stay out of the prompt, not even "just for the fake
+    adapter"."""
     prompt = render_task(ExpertTask(expert="E01", request="r", round=1))
 
     assert "[[CTX" not in prompt
@@ -113,11 +113,10 @@ class _MemoryCache(LLMCache):
 def test_call_meta_is_part_of_the_cache_key() -> None:
     """Same prompt text, different round ⇒ two calls, not one cached answer.
 
-    This is the trap the move creates. Round / expert / mode used to sit inside
-    ``user``, so they were cache-key material for free; lifting them out of the
-    message without folding them back into the key would let round 2 hit round
-    1's cached opinion for the same expert — the consensus loop would silently
-    degenerate, and ``stalled`` would fire on the wrong grounds.
+    Round / expert / mode travel out of band, so the key has to fold them in
+    explicitly: otherwise round 2 would hit round 1's cached opinion for the same
+    expert — the consensus loop would silently degenerate, and ``stalled`` would
+    fire on the wrong grounds.
     """
     cfg = base_settings.model_copy(update={"deepseek_api_key": SecretStr("test-key")})
     cache = _MemoryCache()
@@ -173,8 +172,8 @@ def test_call_meta_never_reaches_the_provider() -> None:
 
 
 def test_the_fake_adapter_reads_its_context_from_meta() -> None:
-    """``plan`` is keyed by round and expert, so the fake must see the meta —
-    this is the "FakeLLM 的驱动方式" cost §12 1f predicted."""
+    """``plan`` is keyed by round and expert, so the fake must read its context
+    from the out-of-band meta (§12 1f)."""
     llm = FakeLLM(plan={1: {"E01": "approve"}, 2: {"E01": "reject"}})
 
     async def decide(round_no: int) -> str:
