@@ -28,12 +28,15 @@ from .agents.experts import select_experts
 from .agents.guard import Guard
 from .agents.memory import MemoryService, collect_hard_constraints
 from .agents.meta import RuleSkeleton
-from .agents.runtime import META_SPEC, AgentRuntime
+from .agents.runtime import META_SPEC, PLANNER_SPEC, AgentRuntime
+from .agents.skills.plan_writing import PlanContext
 from .config import settings as default_settings
 from .contracts import (
     DECISION_SCORES,
     DISCIPLINE_NAMES,
     EXPERT_IDS,
+    PLAN_HEADING_LABELS,
+    REQUIRED_PLAN_HEADINGS,
     AssuranceLevel,
     EntityRef,
     EvidenceBundle,
@@ -44,6 +47,10 @@ from .contracts import (
     Grounding,
     HumanReviewRequest,
     IntentCompletion,
+    PlanClaim,
+    PlanDraft,
+    PlanSection,
+    PlanSource,
     ReviewReason,
     RunInput,
     RunResult,
@@ -277,6 +284,8 @@ REVIEW_REASON_LABELS: dict[ReviewReason, str] = {
     "disagreement": "存在明确反对（reject）——分歧未决，需人工裁定",
     "conditions_only": "无人明确反对，但支持度不足以自动交付——附条件方案需人工确认",
     "evidence_gap": "专家一致判断证据不足——需先补齐证据再评审",
+    # 唯一不来自专家意见构成的一条：方案节点拒绝整份方案（D-98 的必需章节无支撑）。
+    "unsupported_plan": "方案节点写出的方案里，必需章节没有一条有证据支撑——不得交付，转人工复核",
 }
 
 
@@ -413,6 +422,259 @@ def detect_oscillations(
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Stage 6 — 方案生成节点（D-98）
+# --------------------------------------------------------------------------- #
+
+
+def build_plan_context(
+    *,
+    request: str,
+    opinions: Mapping[str, ExpertOpinion],
+    evidence: Mapping[str, str],
+    status: str,
+    review_reason: str | None,
+    conditions: Sequence[str],
+    grounding: Grounding,
+    assurance: AssuranceLevel,
+    human_facts: Sequence[str] = (),
+    session_notes: Sequence[str] = (),
+    previous_plan: PlanDraft | None = None,
+    plan_feedback: Sequence[str] = (),
+) -> PlanContext:
+    """投影出方案撰写者能看到的一切。**确定性**（同样的输入 → 同样的 prompt）。
+
+    注意它给的是**完整意见（含身份）**——这是 D-100 记录的那次有意偏离：匿名披露（D-77）是给
+    评审者用的，撰写者是汇总者，需要身份做专业归口。
+    """
+    return PlanContext(
+        request=request,
+        opinions=tuple(opinions[expert] for expert in sorted(opinions)),
+        evidence=tuple(sorted(evidence.items())),
+        consensus_status=status,
+        review_reason=review_reason,
+        conditions=tuple(conditions),
+        grounding_basis=grounding.basis,
+        assurance_level=assurance.level,
+        human_facts=tuple(human_facts),
+        session_notes=tuple(session_notes),
+        previous_plan=previous_plan,
+        plan_feedback=tuple(plan_feedback),
+    )
+
+
+def plan_guard(
+    draft: PlanDraft,
+    *,
+    allowed_ids: Sequence[str],
+    conditions: Sequence[str],
+    opinions: Mapping[str, ExpertOpinion],
+) -> tuple[PlanDraft, list[str], list[str]]:
+    """方案守卫（**D-98**，落实 §5.7 的硬约束）。返回 ``(清洗后的草稿, 违规说明, 缺失的必需章节)``。
+
+    三条判据，逐条对应设计里的原文：
+
+    1. **逐条可回溯**：越界的 `evidence_ids` 剔除（与 D-90 同规则）；剔空了的条目直接丢——
+       一份方案不该因为第五条引错 id 而整份作废；
+    2. **必需章节必须有支撑**：`REQUIRED_PLAN_HEADINGS` 里任一章节一条有效条目都没有 → 返回给它，
+       由调用方**拒绝整份方案**（§5.7：「若出现无支撑条目，不得直接交付」）；
+    3. **`conditions` 必须全部落进方案**：缺的从写出该条件的专家意见取 `evidence_ids` **补一条**，
+       而不是拒绝——不变量是「条件必须随交付物走」（D-95），补上就满足了它；拒绝只会让人拿不到方案。
+       （若某个条件找不到来源意见，那是引擎写错，记为违规而不是静默丢弃。）
+    """
+    allowed = set(allowed_ids)
+    dropped = 0
+    sections: list[PlanSection] = []
+    for section in draft.sections:
+        claims: list[PlanClaim] = []
+        for claim in section.claims:
+            kept = [eid for eid in claim.evidence_ids if eid in allowed]
+            if kept:
+                claims.append(PlanClaim(text=claim.text, evidence_ids=kept))
+            else:
+                dropped += 1
+        sections.append(PlanSection(heading=section.heading, body=section.body, claims=claims))
+
+    violations: list[str] = []
+    if dropped:
+        violations.append(f"dropped_unsupported_claims:{dropped}")
+
+    # --- 条件必须全部落进交付物 ------------------------------------------ #
+    spoken = "\n".join(
+        [section.body for section in sections]
+        + [claim.text for section in sections for claim in section.claims]
+    )
+    missing_conditions = [item for item in conditions if item not in spoken]
+    if missing_conditions:
+        target = next((s for s in sections if s.heading == "risk"), None)
+        if target is None:
+            target = PlanSection(heading="risk")
+            sections.append(target)
+        for item in missing_conditions:
+            source = next(
+                (op for op in opinions.values() if item in op.constraints), None
+            )
+            if source is None or not source.evidence_ids:  # pragma: no cover - 引擎写错
+                violations.append(f"condition_without_source:{item[:24]}")
+                continue
+            target.claims.append(
+                PlanClaim(
+                    text=f"施工/采购前必须满足：{item}",
+                    evidence_ids=[eid for eid in source.evidence_ids if eid in allowed],
+                )
+            )
+        violations.append(f"appended_conditions:{len(missing_conditions)}")
+
+    missing_required = [
+        heading
+        for heading in sorted(REQUIRED_PLAN_HEADINGS)
+        if not any(section.heading == heading and section.claims for section in sections)
+    ]
+    return (
+        PlanDraft(
+            sections=sections,
+            assumption_notes=list(draft.assumption_notes),
+            version=draft.version,
+        ),
+        violations,
+        missing_required,
+    )
+
+
+def render_template_plan(
+    *,
+    request: str,
+    opinions: Mapping[str, ExpertOpinion],
+    evidence: Mapping[str, str],
+    conditions: Sequence[str],
+    status: str,
+    review_reason: str | None,
+) -> PlanDraft:
+    """**确定性回落**（D-98）：不调用任何模型，用结构化字段拼出一份合格方案。
+
+    它存在的理由有两个：offline 与单测不能因为多了个 LLM 节点就跑不动；以及——更要紧的——
+    框架闭环不能依赖某个模型这一次是否听话。它只搬**已经结构化的东西**（请求、约束、不确定项、
+    证据），因此天然满足守卫的三条判据。
+    """
+    request_ids = sorted(eid for eid, gist in evidence.items() if gist.startswith("变更请求"))
+    fallback_ids = request_ids or sorted(evidence)[:1]
+
+    sections: list[PlanSection] = [
+        PlanSection(
+            heading="scope",
+            body=f"按下列变更请求执行：{request}",
+            claims=[PlanClaim(text=f"变更内容：{request}", evidence_ids=list(fallback_ids))]
+            if fallback_ids
+            else [],
+        )
+    ]
+
+    constraints: list[PlanClaim] = []
+    uncertainties: list[PlanClaim] = []
+    for expert in sorted(opinions):
+        opinion = opinions[expert]
+        for item in opinion.constraints:
+            constraints.append(
+                PlanClaim(
+                    text=f"[{DISCIPLINE_NAMES.get(expert, expert)}] {item}",
+                    evidence_ids=list(opinion.evidence_ids),
+                )
+            )
+        for item in opinion.uncertainties:
+            uncertainties.append(
+                PlanClaim(
+                    text=f"[{DISCIPLINE_NAMES.get(expert, expert)}] {item}",
+                    evidence_ids=list(opinion.evidence_ids),
+                )
+            )
+
+    opinions_basis = sorted({eid for op in opinions.values() for eid in op.evidence_ids})
+    sections.append(
+        PlanSection(
+            heading="basis",
+            body="依据本轮冻结基线中的历史案例与专家意见（下列条目逐条可回溯）。",
+            claims=[
+                PlanClaim(
+                    text=f"依据证据 {eid}：{evidence.get(eid, '')}"[:200],
+                    evidence_ids=[eid],
+                )
+                for eid in opinions_basis
+            ],
+        )
+    )
+    # 前置条件单独成节并**全部**落条（守卫的第 3 条判据因此在模板路径上天然成立）。
+    sections.append(
+        PlanSection(
+            heading="execution",
+            body="按下述约束组织施工与采购；每条都来自某位专家的明确要求。",
+            claims=constraints,
+        )
+    )
+    sections.append(
+        PlanSection(
+            heading="risk",
+            body="以下事项在开工前必须落实；未落实不得施工。",
+            claims=[
+                PlanClaim(
+                    text=f"施工/采购前必须满足：{item}",
+                    evidence_ids=list(
+                        next(
+                            (op for op in opinions.values() if item in op.constraints),
+                            ExpertOpinion(expert="meta", decision="revise", evidence_ids=fallback_ids),
+                        ).evidence_ids
+                    ),
+                )
+                for item in conditions
+            ],
+        )
+    )
+    if uncertainties:
+        sections.append(
+            PlanSection(
+                heading="open_questions",
+                body="以下信息尚不充分，需在实施前确认。",
+                claims=uncertainties,
+            )
+        )
+    sections.append(
+        PlanSection(
+            heading="evidence_index",
+            body=f"本轮共识状态：{status}"
+            + (f"（原因：{review_reason}）" if review_reason else ""),
+            claims=[
+                PlanClaim(text=f"{eid}：{gist}"[:200], evidence_ids=[eid])
+                for eid, gist in sorted(evidence.items())
+            ],
+        )
+    )
+    return PlanDraft(
+        sections=sections,
+        assumption_notes=["本方案由确定性模板拼出（未经方案撰写模型），内容仅搬迁结构化字段"],
+    )
+
+
+def render_plan_markdown(plan: PlanDraft, *, request: str, plan_source: PlanSource) -> str:
+    """交付物文本。人读这一份；机器读 `RunResult.plan`。"""
+    lines = [
+        "# 变更方案",
+        "",
+        f"- 请求：{request}",
+        f"- 方案版本：v{plan.version}",
+        f"- 产出方式：{'模型撰写' if plan_source == 'agent' else '确定性模板（未经过模型，显式降级）'}",
+    ]
+    for section in plan.sections:
+        label = PLAN_HEADING_LABELS.get(section.heading, section.heading)
+        lines += ["", f"## {label}", ""]
+        if section.body:
+            lines += [section.body, ""]
+        for claim in section.claims:
+            lines.append(f"- {claim.text}（依据 {', '.join(claim.evidence_ids)}）")
+    if plan.assumption_notes:
+        lines += ["", "## 撰写假设（未经证据支撑，需人确认）", ""]
+        lines += [f"- {item}" for item in plan.assumption_notes]
+    return "\n".join(lines)
+
+
 def render_markdown(
     *,
     request: str,
@@ -516,6 +778,8 @@ async def run(
     top_k = top_k or cfg.top_k
 
     warnings: list[str] = []
+    #: 人类提供的事实原文（D-28）：方案撰写者要看到它们，因为它们是一等证据。
+    human_fact_texts: list[str] = []
     ctx.events.emit("run_started", request=run_input.request, max_rounds=max_rounds)
 
     # --- stage 1: intent ------------------------------------------------- #
@@ -568,6 +832,7 @@ async def run(
             # 人类提供的事实登记为**一等证据**（source="human"），可回溯性不破例；
             # 而写 registry 的只有守卫（D-28 / D-71）。
             guard.register_human_facts(f.raw_text for f in human_decision.provided_facts)
+            human_fact_texts = [f.raw_text for f in human_decision.provided_facts]
             chosen = [
                 e
                 for e in EXPERT_IDS
@@ -648,6 +913,112 @@ async def run(
     # 前置条件是**交付物的一部分**（D-95）：交付时它是施工前必须满足的条件，交人时它是裁定的
     # 依据。两种终态都带——否则「有条件通过」在交付物里会变成「无条件通过」。
     conditions = collect_hard_constraints(loop.latest.values())
+
+    # 保证等级必须先算出来：方案撰写者要引用它（`assurance` 只依赖证据与意见，与方案无关，
+    # 因此提前计算不会形成循环依赖）。
+    knowledge_share = _knowledge_share(loop.latest, loop.weights)
+    downgraded = grounding.has_history and knowledge_share > 0.5
+    gap_only = loop.review_reason == "evidence_gap"
+    level = (
+        "knowledge_based"
+        if (not grounding.has_history or downgraded or gap_only)
+        else "history_backed"
+    )
+    inference_basis: list[str] = []
+    if not grounding.has_history:
+        inference_basis = [grounding.note]
+    elif gap_only:
+        inference_basis = ["本轮无任何专业判断（专家一致判断证据不足）：不得声称 history_backed"]
+    elif downgraded:
+        inference_basis = [
+            (
+                f"{knowledge_share:.0%} 的权重来自声明 basis=knowledge 的专家："
+                "本轮证据未支撑其技术细节，故降为 knowledge_based"
+            )
+        ]
+    assurance = AssuranceLevel(
+        level=level,
+        supporting_evidence=sorted(bundle.baseline_ids) if level == "history_backed" else [],
+        inference_basis=inference_basis,
+    )
+
+    session_notes = list(run_input.session.user_constraints) + [
+        f"第 {turn.turn} 轮：{turn.conclusion[:200]}"
+        for turn in run_input.session.recent_turns[-3:]
+    ]
+
+    # ═══ 方案生成节点（D-98）：可交付终态才有，`manual_review` 走的是「回中段再跑」 ═══
+    plan: PlanDraft | None = None
+    plan_source: PlanSource | None = None
+    plan_markdown = ""
+    if loop.status == "approved":
+        draft, spent = await runtime.draft_plan(
+            PLANNER_SPEC,
+            context=build_plan_context(
+                request=intent.normalized_request,
+                opinions=loop.latest,
+                evidence=evidence_gists,
+                status=loop.status,
+                review_reason=loop.review_reason,
+                conditions=conditions,
+                grounding=grounding,
+                assurance=assurance,
+                human_facts=human_fact_texts,
+                session_notes=session_notes,
+                previous_plan=run_input.session.latest_plan,
+                plan_feedback=run_input.plan_feedback,
+            ),
+        )
+        loop.usage = loop.usage + spent
+        if draft is None:
+            # 降级不是失败：外环有确定性回落路径，但**必须说出来**（P5）。
+            warnings.append("plan_agent_failed")
+        else:
+            cleaned, violations, missing_required = plan_guard(
+                draft,
+                allowed_ids=ctx.registry.all_ids(),
+                conditions=conditions,
+                opinions=loop.latest,
+            )
+            warnings.extend(f"plan:{item}" for item in violations)
+            if missing_required:
+                # §5.7 硬约束：必需章节没有一条有支撑 → **不得交付**，降级交人。
+                loop.status = "manual_review"
+                loop.review_reason = "unsupported_plan"  # type: ignore[assignment]
+                warnings.append("plan_unsupported:" + ",".join(missing_required))
+                ctx.events.emit(
+                    "plan_rejected", missing_required=missing_required, violations=violations
+                )
+            else:
+                plan, plan_source = cleaned, "agent"
+                ctx.events.emit(
+                    "plan_drafted",
+                    source="agent",
+                    version=plan.version,
+                    sections=[section.heading for section in plan.sections],
+                )
+        if plan is None and loop.status == "approved":
+            plan = render_template_plan(
+                request=intent.normalized_request,
+                opinions=loop.latest,
+                evidence=evidence_gists,
+                conditions=conditions,
+                status=loop.status,
+                review_reason=loop.review_reason,
+            )
+            plan_source = "template"
+            warnings.append("plan_template_fallback")
+            ctx.events.emit("plan_drafted", source="template", version=plan.version)
+    else:
+        # `manual_review` / `stalled` 不是交付路径（D-98 / D-99）：交人时要补的是证据与专家分配，
+        # 不是一份半成品方案。显式记录，避免「没有方案」被读成「方案生成失败了」。
+        warnings.append(f"plan_skipped:{loop.status}")
+
+    if plan is not None and plan_source is not None:
+        plan_markdown = render_plan_markdown(
+            plan, request=intent.normalized_request, plan_source=plan_source
+        )
+
     conclusion = render_markdown(
         request=intent.normalized_request,
         grounding=grounding,
@@ -663,42 +1034,13 @@ async def run(
         review_reason=loop.review_reason,
     )
 
-    # 保证等级必须反映**专家实际用的依据**，而不只是「检索有没有命中」。真实 run 里出现过
-    # 「4 位专家全凭领域通识判断、系统却报 history_backed」——那等于替一次通识推断背书。
-    # 规则与共识分同口径：以**配置权重和**为分母，声明 basis="knowledge" 的权重占比 > 0.5
-    # 即降级，并在 inference_basis 里写明原因。
-    knowledge_share = _knowledge_share(loop.latest, loop.weights)
-    downgraded = grounding.has_history and knowledge_share > 0.5
-    # 本轮没有任何专业判断（专家一致判断证据不足）时**不得**声称 history_backed：检索命中了
-    # 历史案例，但没有人用它作出结论（D-93 的连带要求，与 basis 降级同一理由）。判据从状态取值
-    # 改成**原因标签**（D-96）——证据缺口如今是 `manual_review` 的一种原因，不再是独立状态。
-    gap_only = loop.review_reason == "evidence_gap"
-    level = (
-        "knowledge_based"
-        if (not grounding.has_history or downgraded or gap_only)
-        else "history_backed"
-    )
-    inference_basis: list[str] = []
-    if not grounding.has_history:
-        inference_basis = [grounding.note]
-    elif gap_only:
-        inference_basis = ["本轮无任何专业判断（专家一致判断证据不足）：不得声称 history_backed"]
-    elif downgraded:
-        reason = (
-            f"{knowledge_share:.0%} 的权重来自声明 basis=knowledge 的专家："
-            "本轮证据未支撑其技术细节，故降为 knowledge_based"
-        )
-        inference_basis = [reason]
-    assurance = AssuranceLevel(
-        level=level,
-        supporting_evidence=sorted(bundle.baseline_ids) if level == "history_backed" else [],
-        inference_basis=inference_basis,
-    )
+    # 保证等级在方案节点之前算好（见上），这里只落终局事件。
     ctx.events.emit(
         "run_finished",
         status=loop.status,
         consensus_score=loop.score,
         assurance=assurance.level,
+        plan_source=plan_source,
         usage=loop.usage.model_dump(),
     )
 
@@ -719,6 +1061,9 @@ async def run(
         usage=loop.usage,
         warnings=tuple(warnings),
         rounds=loop.rounds,
+        plan=plan,
+        plan_source=plan_source,
+        plan_markdown=plan_markdown,
     )
 
 

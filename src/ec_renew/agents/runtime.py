@@ -31,6 +31,7 @@ from ..contracts import (
     ExpertTask,
     GuardVerdict,
     MemoryView,
+    PlanDraft,
     RoundFold,
     StallReport,
     StepRecord,
@@ -43,6 +44,8 @@ from .guard import Guard, LoopState
 from .memory import MemoryService
 from .meta import gap_payload
 from .skills.expert_review import abstain_opinion, run_expert
+from .skills.plan_writing import PlanContext
+from .skills.plan_writing import run_planner as run_plan_skill
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,10 @@ EXPERT_SPEC = AgentSpec(
 META_SPEC = AgentSpec(
     name="meta", kind="meta", depth=0, acts=META_ACTIONS, tools=("read_memory",)
 )
+
+#: 方案撰写者的 spec（**D-98**）：深度 1、动作空间为空、无工具。它是**一次 L0 调用**，
+#: 与子智能体共用同一个 runtime（D-84：不存在第二条执行路径），差别只在技能与 spec。
+PLANNER_SPEC = AgentSpec(name="planner", kind="planner", depth=1, acts=(), tools=())
 
 
 @dataclass
@@ -274,6 +281,43 @@ class AgentRuntime:
             opinions[task.expert] = opinion
             usage = usage + spent
         return opinions, usage
+
+    # ------------------------------------------------------------------ #
+    # 方案生成节点（D-98）：同一个 runtime 的第三次执行，L0 单次调用
+    # ------------------------------------------------------------------ #
+    async def draft_plan(
+        self, spec: AgentSpec, *, context: PlanContext, timeout_s: float = 180.0
+    ) -> tuple[PlanDraft | None, Usage]:
+        """写一版方案。**失败返回 ``None``**（值，不是异常）——外环有确定性回落路径（模板）。
+
+        为什么不让它抛：与子智能体的「异常转状态」同一条纪律（`errors.py` 的总则把预期业务结果
+        定义为状态）。「这次没写出来」是预期内的结果，不该让一次已经收束的评审整份崩掉；
+        真正的引擎错误（``InvariantViolation`` 等）照旧往上抛。
+        """
+        if spec.kind != "planner":
+            raise InvariantViolation("draft_plan 只能跑 planner 的 spec（D-98）")
+
+        step = self._step(node="planner", round_no=0, kind="llm")
+        try:
+            async with asyncio.timeout(timeout_s):
+                plan, usage = await run_plan_skill(
+                    context, self._ctx.llm, events=self._ctx.events
+                )
+            self._done(step, produced=[section.heading for section in plan.sections])
+            return plan, usage
+        except asyncio.CancelledError:
+            raise
+        except (InvariantViolation, BudgetExceeded, StepLimitExceeded):
+            raise
+        except Exception as exc:  # noqa: BLE001 — 有意的「异常转状态」点，见 docstring
+            self._ctx.events.emit(
+                "failure",
+                node="planner",
+                cause_type=type(exc).__name__,
+                message=str(exc)[:200],
+            )
+            self._done(step, outcome="failed")
+            return None, Usage(calls=1)
 
     # ------------------------------------------------------------------ #
     # 元智能体主循环
