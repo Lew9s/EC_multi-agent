@@ -124,6 +124,7 @@ def _run(
     *,
     session: SessionSnapshot | None = None,
     plan_feedback: list[str] | None = None,
+    max_rounds: int | None = None,
     run_id: str = "plan",
 ):  # type: ignore[no-untyped-def]
     ctx = RunContext(
@@ -138,7 +139,8 @@ def _run(
         session=session or SessionSnapshot(session_id="s", anchor_request=REQUEST),
         plan_feedback=plan_feedback or [],
     )
-    return asyncio.run(run(run_input, ctx))
+    extra = {"max_rounds": max_rounds} if max_rounds is not None else {}
+    return asyncio.run(run(run_input, ctx, **extra))
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +176,48 @@ def test_a_manual_review_run_gets_no_plan() -> None:
     assert result.plan_source is None
     assert result.plan_markdown == ""
     assert any(item.startswith("plan_skipped:") for item in result.warnings)
+
+
+def test_plan_eligibility_is_a_closed_rule() -> None:
+    """D-98 + **D-101**：出方案的终态是闭集，逐个数出来。
+
+    `conditions_only` 之所以要出：真实模型在这套语料上从不 `approve`（4 次真实 run 都是
+    三位专家一致 `revise`、支持度 0.50）。若只认 `approved`，框架在真实运行里永不产出交付物。
+    """
+    from ec_renew.workflow import plan_eligible
+
+    # 规则本身：交付 ⇒ 出；交人 ⇒ 只有「无人反对、方向可行」那一档出。
+    assert plan_eligible("approved", None) is True
+    assert plan_eligible("manual_review", "conditions_only") is True
+    for reason in ("quorum", "disagreement", "evidence_gap", "unsupported_plan", None):
+        assert plan_eligible("manual_review", reason) is False, reason
+    assert plan_eligible("stalled", "conditions_only") is False
+    # `approved` 短路：`review_reason` 按 D-96 只在 `manual_review` 时才有值，所以
+    # `("approved", <任何原因>)` 是不可达组合，规则对它的取值不作承诺——这里只固定「交付必出」。
+    assert plan_eligible("approved", "quorum") is True
+
+
+def test_a_conditions_only_run_still_produces_a_draft_plan() -> None:
+    """D-101：无人明确反对 ⇒ 有一致方向 ⇒ 值得写方案，但必须标**未定稿**。"""
+    # max_rounds=1：恒定的脚本化模型在第 2 轮会正确触发不动点（`stalled`），那不属于本用例。
+    result = _run(_ScriptedLLM(decision="revise"), max_rounds=1, run_id="plan-conditions-only")
+
+    assert result.consensus_status == "manual_review"
+    assert result.review_reason == "conditions_only"
+    assert result.plan is not None, "有方向、只是条件没落实 ⇒ 应当产出未定稿方案"
+    assert result.plan_source is not None
+    assert "未定稿" in result.plan_markdown
+    assert CONDITION in result.plan_markdown, "未定稿方案更要把前置条件写全"
+    assert "plan_skipped" not in " ".join(result.warnings)
+
+
+def test_terminal_states_without_an_agreed_direction_get_no_plan() -> None:
+    """分歧未决 / 缺席 / 证据缺口 / 停滞都不出方案——它们没有「方向」可写。"""
+    from ec_renew.workflow import plan_eligible
+
+    for reason in ("disagreement", "quorum", "evidence_gap", "unsupported_plan", None):
+        assert not plan_eligible("manual_review", reason), reason
+    assert not plan_eligible("stalled", "conditions_only")
 
 
 # --------------------------------------------------------------------------- #

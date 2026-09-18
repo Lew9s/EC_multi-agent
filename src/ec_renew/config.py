@@ -53,7 +53,7 @@ class Settings(BaseModel):
     deepseek_model: str = "deepseek-flash"
     deepseek_thinking: str = "disabled"  # disabled | enabled
     llm_temperature: float = 0.0
-    llm_max_tokens: int = 2048
+    llm_max_tokens: int = 8192  # 见 D-101：方案是系统里最长的产物（4096 仍在真实 run 里截断）
     llm_timeout_s: float = 120.0
 
     # ---- Embedding (智谱 Embedding-3, OpenAI 兼容) ------------------------
@@ -137,7 +137,7 @@ class Settings(BaseModel):
             deepseek_model=_s("DEEPSEEK_MODEL", "deepseek-flash"),
             deepseek_thinking=_s("DEEPSEEK_THINKING", "disabled"),
             llm_temperature=_f("LLM_TEMPERATURE", 0.0),
-            llm_max_tokens=_i("LLM_MAX_TOKENS", 2048),
+            llm_max_tokens=_i("LLM_MAX_TOKENS", 8192),
             llm_timeout_s=_f("LLM_TIMEOUT_S", 120.0),
             zhipu_api_key=SecretStr(_s("ZHIPU_API_KEY")),
             zhipu_base_url=_s("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),

@@ -28,7 +28,11 @@ SYSTEM_TEMPLATE = """你是工程变更方案撰写人。你的读者是施工�
 4. 下列前置条件**必须全部**出现在方案里（原文或等价表述）：
 {conditions}
 5. 不要重复评审结论的措辞，要写**怎么做**：范围、依据、施工与采购要求、风险与前置条件。
-6. 只输出一个 JSON 对象，不要 markdown 代码围栏。
+6. **规模上界**（这是给你自己的约束，也是输出能一次写完的前提）：
+   - 全部 `claims` 合计**不超过 24 条**；同一件事只写一条，多位专家提过的**合并**成一条；
+   - 每条 `text` 不超过 120 字；每节 `body` 不超过 200 字；
+   - 不要逐位专家罗列同一批约束——那是评审记录的职责，不是方案的。
+7. 只输出一个 JSON 对象，不要 markdown 代码围栏。
 
 输出格式：
 {{"sections": [{{"heading": "scope", "body": "……", "claims": [{{"text": "……", "evidence_ids": ["E-…"]}}]}}],
@@ -60,9 +64,18 @@ def render_plan_task(context: PlanContext) -> tuple[str, str]:
     else:  # pragma: no cover - 基线永远含请求本身，走不到
         parts.append("## 本轮可引用证据\n（无）")
 
-    parts.append(f"## 共识终态\n状态：{context.consensus_status}"
-                 + (f"｜交人原因：{context.review_reason}" if context.review_reason else "")
-                 + f"\n依据等级：{context.grounding_basis}｜保证等级：{context.assurance_level}")
+    draft_note = (
+        "\n本方案为**未定稿**：无人明确反对、方向可行，但支持度不足以自动交付。"
+        "你必须把每条前置条件写清楚并给出证据，供人工确认。"
+        if context.consensus_status != "approved"
+        else ""
+    )
+    parts.append(
+        f"## 共识终态\n状态：{context.consensus_status}"
+        + (f"｜交人原因：{context.review_reason}" if context.review_reason else "")
+        + f"\n依据等级：{context.grounding_basis}｜保证等级：{context.assurance_level}"
+        + draft_note
+    )
 
     if context.opinions:
         # 完整意见 + 身份：撰写者要做专业归口（D-100）。这里**不做匿名化**，是有意的。

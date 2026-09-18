@@ -427,6 +427,28 @@ def detect_oscillations(
 # --------------------------------------------------------------------------- #
 
 
+def plan_eligible(status: str, review_reason: str | None) -> bool:
+    """本轮是否该产出方案（**D-98 + D-101**）。
+
+    出方案的终态有两个：
+
+    * ``approved``：可交付；
+    * ``manual_review`` + ``conditions_only``：**无人明确反对、方向可行、需先满足前置条件**——
+      这恰恰就是方案撰写者该写的东西（一份方案 + 条件清单），只是要标成**未定稿**。
+
+    其余一律不出：``disagreement``（分歧未决，没有一致方向）、``quorum`` / ``evidence_gap``
+    （压根没有判断）、``unsupported_plan``（方案已被守卫拒过一次，回落模板等于绕开守卫）、
+    ``stalled``（流程已停）。
+
+    D-101 之所以要改 D-98 的原判：真实模型在这套语料上**从不 approve**（累计 4 次真实 run 都是
+    三位专家一致 `revise`、支持度 0.50、`conditions_only`）。若只有 `approved` 出方案，框架在真实
+    运行里**永远不产出交付物**——闭环在纸面上成立、在实践中不成立。
+    """
+    if status == "approved":
+        return True
+    return status == "manual_review" and review_reason == "conditions_only"
+
+
 def build_plan_context(
     *,
     request: str,
@@ -653,14 +675,26 @@ def render_template_plan(
     )
 
 
-def render_plan_markdown(plan: PlanDraft, *, request: str, plan_source: PlanSource) -> str:
-    """交付物文本。人读这一份；机器读 `RunResult.plan`。"""
+def render_plan_markdown(
+    plan: PlanDraft, *, request: str, plan_source: PlanSource, status: str
+) -> str:
+    """交付物文本。人读这一份；机器读 `RunResult.plan`。
+
+    ``status != "approved"`` 时**必须**在头部标明未定稿（D-101）——`conditions_only` 也出方案，
+    但「无人明确反对」不等于「可以施工」；不标就等于把一次附条件评审冒充成批准。
+    """
     lines = [
         "# 变更方案",
         "",
         f"- 请求：{request}",
         f"- 方案版本：v{plan.version}",
         f"- 产出方式：{'模型撰写' if plan_source == 'agent' else '确定性模板（未经过模型，显式降级）'}",
+        "- 方案状态："
+        + (
+            "可交付（共识达标）"
+            if status == "approved"
+            else "**未定稿**——无人明确反对，但前置条件未落实，需人工确认后方可施工"
+        ),
     ]
     for section in plan.sections:
         label = PLAN_HEADING_LABELS.get(section.heading, section.heading)
@@ -951,7 +985,7 @@ async def run(
     plan: PlanDraft | None = None
     plan_source: PlanSource | None = None
     plan_markdown = ""
-    if loop.status == "approved":
+    if plan_eligible(loop.status, loop.review_reason):
         draft, spent = await runtime.draft_plan(
             PLANNER_SPEC,
             context=build_plan_context(
@@ -997,7 +1031,7 @@ async def run(
                     version=plan.version,
                     sections=[section.heading for section in plan.sections],
                 )
-        if plan is None and loop.status == "approved":
+        if plan is None and plan_eligible(loop.status, loop.review_reason):
             plan = render_template_plan(
                 request=intent.normalized_request,
                 opinions=loop.latest,
@@ -1010,13 +1044,16 @@ async def run(
             warnings.append("plan_template_fallback")
             ctx.events.emit("plan_drafted", source="template", version=plan.version)
     else:
-        # `manual_review` / `stalled` 不是交付路径（D-98 / D-99）：交人时要补的是证据与专家分配，
-        # 不是一份半成品方案。显式记录，避免「没有方案」被读成「方案生成失败了」。
+        # 其余终态不是交付路径（D-98 / D-99 / D-101）：交人时要补的是证据与专家分配，
+        # 分歧未决时也没有「方向」可写。显式记录，避免「没有方案」被读成「方案生成失败了」。
         warnings.append(f"plan_skipped:{loop.status}")
 
     if plan is not None and plan_source is not None:
         plan_markdown = render_plan_markdown(
-            plan, request=intent.normalized_request, plan_source=plan_source
+            plan,
+            request=intent.normalized_request,
+            plan_source=plan_source,
+            status=loop.status,
         )
 
     conclusion = render_markdown(
