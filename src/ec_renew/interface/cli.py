@@ -105,6 +105,10 @@ async def _one_turn(
     finally:
         events.close()
 
+    # 交付物先打印：**方案**才是用户拿去施工/采购的东西，评审报告是它的附注（D-98）。
+    if result.plan_markdown:
+        print("\n" + result.plan_markdown)
+        print("\n" + "=" * 72)
     print("\n" + result.conclusion)
     if verbose:
         print(f"\n[tokens] {result.usage.model_dump()}")

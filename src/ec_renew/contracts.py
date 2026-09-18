@@ -509,6 +509,9 @@ class SessionSnapshot(BaseModel):
     anchor_request: str
     recent_turns: tuple[TurnSummary, ...] = ()
     user_constraints: tuple[str, ...] = ()
+    #: 上一版方案（D-99 / §5.9）：迭代回路要「改文本」，就必须拿得到被改的那一版。
+    #: 此前会话只带 `TurnSummary.conclusion` 的散文，不够。
+    latest_plan: PlanDraft | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -521,6 +524,9 @@ class RunInput(BaseModel):
     session: SessionSnapshot = Field(
         default_factory=lambda: SessionSnapshot(session_id="default", anchor_request="")
     )
+    #: 用户对**上一版方案**的逐条意见（D-99 / §5.9 的迭代回路）。非空即表示这一轮走的是
+    #: 「只迭代方案文本」的路径——不重跑专家评审（重评要动事实基线，那是另一条回路）。
+    plan_feedback: list[str] = Field(default_factory=list)
 
 
 class Usage(BaseModel):
@@ -603,7 +609,61 @@ class StallReport(BaseModel):
 #: ``manual_review`` 的**原因**（D-96）：状态值只回答「交不交人」，原因回答「交给人时该说什么」。
 #: 两者拆开之后，状态机不必为每种情形各长一个取值——原因由专家意见的**构成**确定性判定
 #: （`workflow.manual_review_reason`），人可以读报告里的「交人原因」行，机器读 `review_reason`。
-ReviewReason = Literal["quorum", "disagreement", "conditions_only", "evidence_gap"]
+#: ``unsupported_plan`` 是**唯一**不来自专家意见构成的一条：方案节点拒绝整份方案时（D-98）由外环
+#: 覆写，因此 `manual_review_reason()` 永远不会返回它。
+ReviewReason = Literal[
+    "quorum", "disagreement", "conditions_only", "evidence_gap", "unsupported_plan"
+]
+
+#: 方案骨架的固定章节（**D-98**）。必须是**枚举**：「骨架由契约固定」只有枚举才有可校验的形态——
+#: 若让模型自创标题，就无法判断它有没有漏掉「风险与前置条件」这一节。
+PlanHeading = Literal["scope", "basis", "execution", "risk", "open_questions", "evidence_index"]
+
+#: 章节 → 渲染用中文标题。放在契约里而不是渲染函数里，是为了让「骨架」只有一个定义处。
+PLAN_HEADING_LABELS: dict[str, str] = {
+    "scope": "变更范围",
+    "basis": "技术依据",
+    "execution": "施工与采购要求",
+    "risk": "风险与前置条件",
+    "open_questions": "待确认事项",
+    "evidence_index": "证据索引",
+}
+
+#: 缺失即视为方案不合格的章节（Q-30 未定前取最小集：前四节）。
+REQUIRED_PLAN_HEADINGS: frozenset[str] = frozenset({"scope", "basis", "execution", "risk"})
+
+#: ``RunResult.plan_source``：方案由模型撰写还是模板拼出。**降级必须显式**（P5）。
+PlanSource = Literal["agent", "template"]
+
+
+class PlanClaim(BaseModel):
+    """方案里**需要可回溯**的一条（D-98）。``evidence_ids`` 为空即「无支撑」，契约层直接挡掉。"""
+
+    text: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+class PlanSection(BaseModel):
+    """一节方案：``body`` 是自由叙述，``claims`` 是需要逐条可回溯的部分。"""
+
+    heading: PlanHeading
+    body: str = ""
+    claims: list[PlanClaim] = Field(default_factory=list)
+
+
+class PlanDraft(BaseModel):
+    """方案产物（D-98）：**骨架结构化 + 正文自由**。
+
+    为什么这样切：§5.7 的硬约束是「最终方案中任何条目不得无支撑」，而「哪句话靠哪条证据」无法从
+    一段自由 Markdown 里机械校验。把需要可回溯的部分（``claims``）与叙述部分（``body``）分开，
+    校验就落在骨架上，行文也不被模板腔绑住。
+    """
+
+    sections: list[PlanSection] = Field(default_factory=list)
+    #: 撰写时做过的假设。它是不带证据的叙述的**唯一出口**——不能进 `claims` 的话必须写在这里被看见。
+    assumption_notes: list[str] = Field(default_factory=list)
+    #: §5.9 的迭代回路每改一版递增。
+    version: int = 1
 
 
 class RunResult(BaseModel):
@@ -636,13 +696,20 @@ class RunResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     warnings: tuple[str, ...] = ()
     rounds: int = 0
+    #: 方案产物（D-98）。**只有可交付终态才有**：`manual_review`（评审未决）走的是「回中段再跑」，
+    #: 不是交付路径，所以那两份产物是 `None`。
+    plan: PlanDraft | None = None
+    #: 方案由谁产出：`agent`（模型撰写）或 `template`（确定性回落）。降级必须显式（P5）。
+    plan_source: PlanSource | None = None
+    #: 交付物文本（渲染后的方案）。人读这一份；机器读 `plan`。
+    plan_markdown: str = ""
 
 
 # --------------------------------------------------------------------------- #
 # Orchestration (design.md §5.4 / §6.6.1 — D-70…D-91)
 # --------------------------------------------------------------------------- #
 
-AgentKind = Literal["meta", "expert"]
+AgentKind = Literal["meta", "expert", "planner"]
 StepKind = Literal["think", "act", "observe", "llm", "tool", "guard"]
 MetaAction = Literal[
     "read_memory",

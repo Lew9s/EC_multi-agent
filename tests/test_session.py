@@ -150,6 +150,7 @@ class _RecordingLLM:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.purposes: list[str] = []
 
     async def complete(
         self,
@@ -160,6 +161,7 @@ class _RecordingLLM:
         meta: LLMCallMeta | None = None,
     ) -> LLMResult:
         self.prompts.append(user)
+        self.purposes.append(purpose)
         cited = sorted(set(re.findall(r"E-[0-9a-f]{12}", user))) or ["E-9c4b1e7a2f03"]
         return LLMResult(
             content=json.dumps(
@@ -210,5 +212,11 @@ def test_no_session_history_reaches_a_sub_agent_prompt() -> None:
     )
 
     assert llm.prompts, "没捕获到任何 prompt，这条用例就失去意义了"
-    for prompt in llm.prompts:
+    # 会话历史不进**评审专家**的 prompt（独立判断不能被上一轮污染）。方案撰写者（D-98）是例外：
+    # 它按设计要拿到会话上下文与用户意见——那里的偏离由 D-100 记录，与这条断言不冲突。
+    expert_prompts = [
+        prompt for prompt, purpose in zip(llm.prompts, llm.purposes) if purpose == "expert"
+    ]
+    assert expert_prompts, "前提：本轮确实派发过专家"
+    for prompt in expert_prompts:
         assert _SENTINEL not in prompt
