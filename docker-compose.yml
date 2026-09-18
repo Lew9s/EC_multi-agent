@@ -18,9 +18,15 @@ services:
     image: qdrant/qdrant:v1.17.1
     container_name: ec-renew-qdrant
     restart: unless-stopped
+    # ⚠ 宿主端口不能随便定：Windows 会保留一段 TCP 区间
+    #   （`netsh int ipv4 show excludedportrange protocol=tcp`，典型是 6264-6363），
+    #   落在区间内的端口 Docker **绑不上**——容器照样 Up、`docker inspect` 里也有
+    #   PortBindings，但 `docker port` 为空、宿主连接被拒（daemon 报 WSAEACCES 10013）。
+    #   Qdrant 官方端口 6333 恰在此区间，因此 `.env.example` 默认给 16333；
+    #   Linux / CI 上把 QDRANT_HTTP_PORT / QDRANT_GRPC_PORT 设回 6333 / 6334 即可。
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"   # REST / Web UI
-      - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC（qdrant-client 优先走这条）
+      - "${QDRANT_HTTP_PORT:-16333}:6333"  # REST / Web UI
+      - "${QDRANT_GRPC_PORT:-16334}:6334"  # gRPC（qdrant-client 优先走这条）
     volumes:
       - qdrant_data:/qdrant/storage
     # 本地实验默认不开鉴权。若要开：在 .env 里设 QDRANT_API_KEY=xxx
