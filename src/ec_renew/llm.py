@@ -38,9 +38,8 @@ from .errors import PermanentExternalError, RateLimited, TransientError
 
 #: ``E-`` + 12 hex chars — the evidence ids the fake adapter cites.
 #:
-#: The context that used to ride along in a ``[[CTX expert=… round=…]]`` prompt
-#: header is now passed out of band as ``LLMCallMeta`` (design §12 1f), so there
-#: is deliberately no prompt-header parser left in this module.
+#: 调用上下文不进 prompt：expert / round / mode 一律以 ``LLMCallMeta`` 带外传递
+#: （design §12 1f），因此本模块没有 prompt 头解析器。
 _EID_RE = re.compile(r"E-[0-9a-f]{12}")
 
 
@@ -73,12 +72,10 @@ class LLMCache:
     ) -> str:
         """Content-addressed key for one call.
 
-        ``meta`` is part of the key **on purpose**. Round / expert / mode used to
-        live inside ``user`` as a header line, so they were already key material;
-        lifting them out of the message text without folding them back in here
-        would let round 2 hit round 1's cached answer for the same expert — same
-        prompt text, different question. See
-        ``test_call_meta_is_part_of_the_cache_key``.
+        ``meta`` 是键的一部分，**这是有意的**：expert / round / mode 决定了「同一个
+        prompt 文本问的是不是同一个问题」。不把它们折进键，第 2 轮就会命中第 1 轮
+        同一专家的缓存答案——文本相同、问题不同。见
+        ``test_call_meta_is_part_of_the_cache_key``。
         """
         payload = json.dumps(
             {
@@ -169,12 +166,8 @@ class FakeLLM:
     def _intent(self, user: str) -> dict[str, Any]:
         """Best-effort request text for the fake's intent branch.
 
-        This branch has no producer in the pipeline today (``complete_intent``
-        never calls the LLM), and the ``request=`` field it used to read out of
-        the ``[[CTX …]]`` header was never written by any caller — so it had
-        already been degrading to an empty string. With the header gone, the
-        request is taken from the user message, which is where a real intent
-        call would put it.
+        这条分支在当前管道里没有生产者（``complete_intent`` 不调用 LLM），
+        因此请求文本取自 user 消息的第一行——真实意图调用也会把它放在那里。
         """
         request = next((line.strip() for line in user.splitlines() if line.strip()), "")
         return {

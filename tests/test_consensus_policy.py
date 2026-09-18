@@ -1,20 +1,17 @@
 """D-95 / **D-96**：共识判定分两层，而「停止时如何分类」只分**交付 / 交人**。
 
-本文件把优化前后的差别钉成一张**可复算的矩阵**。优化前 `score ≥ threshold` 一个标量决定一切，
-于是出现了三件事：
+判定是结构化的：**收敛**要求无 `reject` + 至少一位 `approve` + 支持度 ≥ threshold；
+**终态**只有两个出口，把「因为什么交人」移到 `review_reason`。
 
-1. **二义性**：`score = 0.5 + (a − j − x)/2` 里 `revise` 被消掉 → 「全员一致附条件」与
-   「赞反对峙」算出同一个 `0.5000`，状态机也报同一个 `manual_review`；
-2. **n 敏感**：「1 位赞成 + 其余仅提条件」在 n=5 时恰好 0.60 通过、n=6 时 0.5833 不通过
-   —— 同样内容，只因多请了一位只提条件的专家就翻结论；
-3. **全 `revise` 恒 0.50**：结构性不可能通过，且被误报成「专家分歧未解决」。
+本文件把这两层钉成一张**可复算的矩阵**（`MATRIX` / `REASON_MATRIX`），守着两条：
 
-D-95 把**收敛判据**改成结构化的（无 `reject` + 至少一位 `approve` + 支持度 ≥ threshold），
-并给终态补了 `conditional`。D-96 再把终态收成两个出口（交付 / 交人），把「因为什么交人」
-移到 `review_reason`。
+1. **状态值是闭集**：`approved` / `stalled` / `manual_review` 之外没有取值，因为多出来的
+   取值没有对应的行为差；
+2. **信息没有被丢掉**：把「全员附条件」与「赞反对峙」并成同一个 `manual_review` 之后，
+   两者仍靠 `manual_review_reason` 分得开（`test_a_deadlock_...`）。
 
-**本文件同时守着这两条**：状态值不再区分「附条件」与「分歧」（`test_a_deadlock_...`），
-但这两者**没有被丢掉**——它们在 `manual_review_reason` 里分得开（`REASON_MATRIX`）。
+支持度阈值仍留有一档残余的规模敏感性（`approved` ↔ `manual_review`）：它不影响「交给谁」，
+只影响「明确支持够不够」，口径见 Q-26。
 """
 
 from __future__ import annotations
@@ -65,7 +62,7 @@ MATRIX: tuple[tuple[str, list[str], str], ...] = (
     # 全 revise：一致认为方向可行、需先满足条件 —— 无人反对，但没人明确赞成，所以**交人**
     ("全 revise（n=3）", ["revise"] * 3, "manual_review"),
     ("全 revise（n=6）", ["revise"] * 6, "manual_review"),
-    # 有人明确反对 → 交人裁定。注意这**不再**被「赞成票更多」平均掉
+    # 有人明确反对 → 交人裁定，不被「赞成票更多」平均掉
     ("半 approve 半 reject（n=4）", ["approve", "approve", "reject", "reject"], "manual_review"),
     ("3 approve + 1 reject（n=4）", ["approve"] * 3 + ["reject"], "manual_review"),
     ("2 approve + 2 revise + 2 reject", ["approve"] * 2 + ["revise"] * 2 + ["reject"] * 2, "manual_review"),
@@ -73,8 +70,8 @@ MATRIX: tuple[tuple[str, list[str], str], ...] = (
     ("1 approve + 其余 revise（n=3）", ["approve", "revise", "revise"], "approved"),
     ("1 approve + 其余 revise（n=5）", ["approve"] + ["revise"] * 4, "approved"),
     # 支持度 1/6 = 0.167 < 0.6 → 交人，而不是「通过」：五位专家都只肯说「先满足条件」，
-    # 标成 approved 会高估支持度。**残余的 n 敏感性就留在这一档**（approved↔manual_review），
-    # 它现在不影响「交给谁」，只影响「明确支持够不够」；口径见 Q-26。
+    # 标成 approved 会高估支持度。残余的 n 敏感性只留在这一档（approved↔manual_review），
+    # 它不影响「交给谁」，只影响「明确支持够不够」；口径见 Q-26。
     ("1 approve + 其余 revise（n=6）", ["approve"] + ["revise"] * 5, "manual_review"),
     ("全 approve（n=4）", ["approve"] * 4, "approved"),
     # 支持度不足（1 赞成 + 4 弃权 → 0.2）→ 交人，而不是「通过」
@@ -89,18 +86,18 @@ def test_final_classification(label: str, decisions: list[str], expected: str) -
 
 def test_state_values_are_exactly_three() -> None:
     """状态机只有三个取值（D-96）。这条不是形式主义：每多一个取值，每个消费者就多一个必须
-    分支的取值，而这两个被并掉的取值**没有对应的行为差**（收束 act 只认 approved / stalled，
-    `conditional` 从未因此自动交付，它一直也在问人）。"""
+    分支的取值，而这三个之外**没有对应的行为差**（收束 act 只认 approved / stalled，
+    其余情形一律问人）。"""
     observed = {terminal for _label, _decisions, terminal in MATRIX}
     assert observed == {"approved", "manual_review"}
 
 
 # --------------------------------------------------------------------------- #
-# 被并掉的两个取值：信息搬到了 `review_reason`，**没有丢**
+# 「附条件」与「分歧」：信息在 `review_reason` 里，**没有丢**
 # --------------------------------------------------------------------------- #
 
 REASON_MATRIX: tuple[tuple[str, list[str], str], ...] = (
-    # 缺席（有效专家不足）—— D-37 一直要求「缺席不得当作通过」，却从没给它一个可辨认的标签
+    # 缺席（有效专家不足）—— D-37 要求「缺席不得当作通过」，这里给它一个可辨认的标签
     ("全执行失败弃权（n=3）", ["abstain"] * 3, "quorum"),
     ("全员判断性弃权", ["abstain"] * 3, "evidence_gap"),
     ("有人明确反对", ["approve", "approve", "reject", "reject"], "disagreement"),
@@ -123,29 +120,27 @@ def test_manual_review_reason(label: str, decisions: list[str], expected: str) -
 
 
 def test_all_revise_is_the_same_verdict_for_any_panel_size() -> None:
-    """优化前：n=3 与 n=6 都是 0.5000（二义性）；现在两者都明确交人，原因同为「附条件」。"""
+    """任何规模的全 `revise` 都落在同一个终态与同一个原因上：交人 + 附条件。"""
     assert _judge(["revise"] * 3, final=True) == "manual_review"
     assert _judge(["revise"] * 6, final=True) == "manual_review"
     assert _reason(["revise"] * 3) == _reason(["revise"] * 6) == "conditions_only"
 
 
 def test_one_approver_no_longer_flips_with_panel_size() -> None:
-    """优化前：n=5 恰好压线 0.6000 通过、**n=6 只有 0.5833 不通过**——同样内容两种结论，
-    而且「不通过」意味着交人裁定。
+    """同样内容在两种规模下的交付强度不同：n=5 支持度达标 → 交付，n=6 → 交人附条件确认。
 
-    优化后：两种规模都只看「有没有人反对」（与规模无关）；差别只剩「明确支持够不够」这一档：
-    n=5 支持度达标 → 交付，n=6 → 交人附条件确认。残余的规模敏感性被限制在**交付强度**上，
-    见 Q-26。
+    判据只看「有没有人反对」（与规模无关）；差别只剩「明确支持够不够」这一档。残余的规模
+    敏感性被限制在**交付强度**上，见 Q-26。
     """
     assert _judge(["approve"] + ["revise"] * 4, final=True) == "approved"
     assert _judge(["approve"] + ["revise"] * 5, final=True) == "manual_review"
 
 
 def test_a_deadlock_is_not_reported_as_agreement() -> None:
-    """D-95 的原始用例：优化前「半赞成半反对」与「全 revise」同为 0.5000，无法区分。
+    """「半赞成半反对」与「全 revise」的**状态值**同为 `manual_review`——但区分还在，
+    只是搬到了原因上。
 
-    D-96 之后两者的**状态值**重新变成同一个 `manual_review`——但区分还在，只是搬到了原因上。
-    这正是本条用例要守的东西：并掉状态取值**不等于**并掉那条信息。
+    这正是本条用例要守的东西：并掉状态取值**不等于**并掉那条信息（D-95 / D-96）。
     """
     assert _judge(["approve", "approve", "reject", "reject"], final=True) == "manual_review"
     assert _judge(["revise"] * 4, final=True) == "manual_review"
@@ -159,7 +154,7 @@ def test_a_deadlock_is_not_reported_as_agreement() -> None:
 
 
 def test_unconverged_rounds_still_retry() -> None:
-    """`final=False` 时未收敛一律 `retry`——迭代不能被这次优化掐掉。"""
+    """`final=False` 时未收敛一律 `retry`：收敛判据不改变迭代本身。"""
     for _label, decisions, terminal in MATRIX:
         if terminal != "approved":
             assert _judge(decisions, final=False) == "retry"
@@ -172,8 +167,8 @@ def test_converged_rounds_report_approved_immediately() -> None:
 def test_quorum_and_evidence_gap_are_terminal_at_once() -> None:
     """缺席与「一致判断证据不足」不等待轮次：它们不是「再跑一轮就能变好」的情形。
 
-    D-96 之后两者都是 `manual_review`（当轮收束），区分靠原因——如果只看状态值，这两个**补救
-    动作相反**的情形（补评审 vs 补证据）会长得一模一样。
+    两者都是 `manual_review`（当轮收束），区分靠原因——如果只看状态值，这两个**补救动作
+    相反**的情形（补评审 vs 补证据）会长得一模一样。
     """
     experts = ["E01", "E02", "E03"]
     weights = {e: 1.0 for e in experts}

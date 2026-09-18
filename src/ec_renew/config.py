@@ -53,7 +53,7 @@ class Settings(BaseModel):
     deepseek_model: str = "deepseek-flash"
     deepseek_thinking: str = "disabled"  # disabled | enabled
     llm_temperature: float = 0.0
-    llm_max_tokens: int = 8192  # 见 D-101：方案是系统里最长的产物（4096 仍在真实 run 里截断）
+    llm_max_tokens: int = 8192  # 见 D-101：方案是系统里最长的产物，输出上限需留足余量
     llm_timeout_s: float = 120.0
 
     # ---- Embedding (智谱 Embedding-3, OpenAI 兼容) ------------------------

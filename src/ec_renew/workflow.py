@@ -10,7 +10,7 @@ Invariants enforced in this module
 2. Parallel results are merged in **sorted** order, so a live run and a replay
    produce byte-identical output.
 3. Consensus denominator is the **configured** weight sum, so an abstaining
-   expert cannot inflate the score (fixes the defect found in CDIACR).
+   expert cannot inflate the score.
 4. No evidence -> no expert dispatch (the no-history branch).
 5. An expert never sees another expert's judgment or the session history.
 6. A round that adds no evidence and moves no prompt-affecting field is a fixed
@@ -178,8 +178,8 @@ def assess_grounding(bundle: EvidenceBundle) -> Grounding:
 # --------------------------------------------------------------------------- #
 # Stage 3 — expert dispatch
 # --------------------------------------------------------------------------- #
-# 派发本身（含「异常转状态」的那一个宽泛捕获点）已移入
-# ``agents/runtime.AgentRuntime``：§3.1 要求它是**唯一执行入口**，不得有第二条执行路径。
+# 派发（含「异常转状态」的那一个宽泛捕获点）在 ``agents/runtime.AgentRuntime`` 里：
+# §3.1 要求它是**唯一执行入口**，不得有第二条执行路径。
 
 
 # --------------------------------------------------------------------------- #
@@ -203,17 +203,17 @@ def consensus(
        `manual_review`（交人）。「因为什么交人」**不是状态取值的事**，而是
        :func:`manual_review_reason` 的事（D-96）。
 
-    为什么把分数从**判据**降为**描述性支持度**（D-95）：`score = 0.5 + (a − j − x)/2` 里
-    `revise` 被完全消掉，于是「全员一致附条件」与「赞反对峙」算出**同一个 0.5000**——一个无法
-    区分这两种局面的数字不该拥有裁定权。分数照旧计算并报告（它仍表达「明确支持的强度」，用于
-    区分「明确通过」与「交人」），但它不再决定「交给人还是交付」。
+    分数是**描述性支持度**，不是判据（D-95）：`score = 0.5 + (a − j − x)/2` 里 `revise` 被完全
+    消掉，于是「全员一致附条件」与「赞反对峙」算出**同一个 0.5000**——一个无法区分这两种局面的
+    数字不该拥有裁定权。分数照旧计算并报告（它仍表达「明确支持的强度」，用于区分「明确通过」与
+    「交人」），但它不决定「交给人还是交付」。
 
-    另两条不变：分母是**配置权重和**（D-38，弃权计 0 分故只能压低分数）；`final=False` 时
+    另两条不变量：分母是**配置权重和**（D-38，弃权计 0 分故只能压低分数）；`final=False` 时
     未收敛一律返回 `retry`（循环继续），终态由外环在轮次结束时以 `final=True` 取得。
     """
     # 「有效专家」= **交付了意见**的专家（D-93）。弃权是一次交付（它是一条完整的、带证据的
-    # 判断），只有**执行失败**才是缺席。D-37 的原意是「避免缺席被当作通过」，此前却把「缺席」
-    # 等同于了 `abstain` 这个值——于是「四位专家一致说证据不足」被读成「四位专家缺席」。
+    # 判断），只有**执行失败**才是缺席；D-37 要求「缺席不得被当作通过」，故缺席必须与
+    # `abstain` 分开计。
     delivered = {
         expert: op for expert, op in opinions.items() if op.abstain_kind != "execution_failure"
     }
@@ -244,10 +244,8 @@ def consensus(
         return score, effective, "retry"
 
     # --- 第 2 层：停止时的分类（决定交给人还是交付） ---------------------- #
-    # 唯一的另一个出口就是交人；**「为什么」由 reason 回答，不在这里分叉**（D-96）。曾经这里按
-    # 「有 reject / 无 reject」分成 `manual_review` 与 `conditional`，但那个区分没有对应的行为差
-    # ——收束 act 一直是 `closing(status=="approved", status=="stalled")`，`conditional` 从未因此
-    # 自动交付，它实际也在问人。状态值与实际行为不一致，且多出一个消费者必须分支的取值。
+    # 唯一的另一个出口就是交人；**「为什么」由 reason 回答，不在这里分叉**（D-96）：状态值只
+    # 承载「交付 / 交人」这一件事，再细的区分归 :func:`manual_review_reason`，消费者不必为此分支。
     return score, effective, "manual_review"
 
 
@@ -260,10 +258,9 @@ def manual_review_reason(
     原因：缺席（有效专家不足）→ 证据缺口（全员判断性弃权）→ 分歧（有人明确反对）→ 其余
     （无人反对、但支持度不足以自动交付，多为全员附条件）。
 
-    为什么「缺席」也值得一个标签：D-37 只规定了「缺席不得被当作通过」，从未给它一个状态取值，
-    于是「有人没交出意见」与「专家分歧未决」在契约里长得一模一样。既然这个字段是交人记录的一
-    部分，就不能对它撒谎——把缺席说成 `conditions_only`（读起来像「条件都谈妥了」）会误导接手
-    的人。这是把状态值并掉之后**新增**的一条信息，不是搬走的那两条。
+    为什么「缺席」也值得一个标签：D-37 要求「缺席不得被当作通过」，而「有人没交出意见」与
+    「专家分歧未决」是交人时要说的两件不同的事。这个字段是交人记录的一部分，就不能对它撒谎
+    ——把缺席说成 `conditions_only`（读起来像「条件都谈妥了」）会误导接手的人。
     """
     delivered = {
         expert: op for expert, op in opinions.items() if op.abstain_kind != "execution_failure"
@@ -355,10 +352,10 @@ def detect_stall(
     in the prompt, this establishes "no further information gain", not a
     byte-level proof of identical output — see docs/design.md §5.4.4.
 
-    The alternative it replaces is worse either way: continuing yields the same
-    opinions (a loop that only ``max_rounds`` stops), or yields different ones
-    *because of a semantically empty counter* — which would mean enshrining
-    sensitivity to an irrelevant number.
+    Skipping the check is worse either way: continuing yields the same opinions
+    (a loop that only ``max_rounds`` stops), or yields different ones *because of
+    a semantically empty counter* — which would mean enshrining sensitivity to an
+    irrelevant number.
     """
     if set(current_baseline) - set(previous_baseline):
         return False
@@ -437,12 +434,11 @@ def plan_eligible(status: str, review_reason: str | None) -> bool:
       这恰恰就是方案撰写者该写的东西（一份方案 + 条件清单），只是要标成**未定稿**。
 
     其余一律不出：``disagreement``（分歧未决，没有一致方向）、``quorum`` / ``evidence_gap``
-    （压根没有判断）、``unsupported_plan``（方案已被守卫拒过一次，回落模板等于绕开守卫）、
+    （压根没有判断）、``unsupported_plan``（守卫已判定必需章节无支撑，回落模板等于绕开守卫）、
     ``stalled``（流程已停）。
 
-    D-101 之所以要改 D-98 的原判：真实模型在这套语料上**从不 approve**（累计 4 次真实 run 都是
-    三位专家一致 `revise`、支持度 0.50、`conditions_only`）。若只有 `approved` 出方案，框架在真实
-    运行里**永远不产出交付物**——闭环在纸面上成立、在实践中不成立。
+    为什么 ``conditions_only`` 也出方案（D-101）：它是真实语料上的常见终态，若只认 ``approved``，
+    框架就永远不产出交付物——闭环在纸面上成立、在实践中不成立。
     """
     if status == "approved":
         return True
@@ -466,8 +462,8 @@ def build_plan_context(
 ) -> PlanContext:
     """投影出方案撰写者能看到的一切。**确定性**（同样的输入 → 同样的 prompt）。
 
-    注意它给的是**完整意见（含身份）**——这是 D-100 记录的那次有意偏离：匿名披露（D-77）是给
-    评审者用的，撰写者是汇总者，需要身份做专业归口。
+    注意它给的是**完整意见（含身份）**：匿名披露（D-77）是给评审者用的，撰写者是汇总者，
+    需要身份做专业归口（D-100）。
     """
     return PlanContext(
         request=request,
@@ -776,7 +772,7 @@ def render_markdown(
         lines.append("")
 
     if evidence_requests:
-        # 缺口清单第一次进入**结构化契约**（RunResult.evidence_requests），报告里也要看得见：
+        # 缺口清单是**结构化契约**的一部分（RunResult.evidence_requests），报告里也要看得见：
         # 「缺什么」是这次评审最可执行的产出，不该只沉在 uncertainties 的散文里（D-94）。
         lines.append("## 需要补充的证据")
         lines.append("")
@@ -913,8 +909,8 @@ async def run(
     warnings.extend(loop.warnings)
     stall = loop.stall
 
-    # 证据请求：管道已通，但检索端口还没有 `search()`（docs/rag.md §9 的双接口只实现了
-    # prefetch）。**不静默**：显式标注未满足并落事件（P5）。
+    # 证据请求：检索端口尚未实现 `search()`（docs/rag.md §9 的双接口只实现了 prefetch）。
+    # **不静默**：显式标注未满足并落事件（P5）。
     if guard.evidence_requests:
         if hasattr(ctx.retriever, "search"):
             ctx.events.emit("evidence_request_deferred", count=len(guard.evidence_requests))
@@ -926,7 +922,7 @@ async def run(
                 reason="检索端口未实现 search()，本轮证据请求无法满足（docs/rag.md §9）",
             )
 
-    # --- stage 4：循环已由 AgentsRuntime 执行，见中段 --------------------- #
+    # --- stage 4：循环由 AgentRuntime 执行，见中段 ------------------------ #
 
     # ═══ 后段：确定性收尾（外环） ══════════════════════════════════════════ #
     # 振荡：只记录、不驱动控制流（D-81）。逐轮决策矩阵本来就在事件日志的

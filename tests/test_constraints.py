@@ -57,10 +57,8 @@ def opinion(expert: str, decision: str) -> ExpertOpinion:
 def test_abstaining_cannot_inflate_consensus() -> None:
     """The defect found in CDIACR: a missing expert must never raise the score.
 
-    The old implementation summed weights over *present* opinions only, so an
-    abstaining expert was dropped from the denominator and the score went UP.
-    Here the denominator is the configured weight sum, so abstaining can only
-    lower the score. ``min_effective=2`` keeps the quorum gate out of the way.
+    The denominator is the configured weight sum, so abstaining can only lower
+    the score. ``min_effective=2`` keeps the quorum gate out of the way.
     """
     weights = {"E01": 1.0, "E02": 1.0, "E03": 1.0}
     everyone_approves = {e: opinion(e, "approve") for e in weights}
@@ -79,8 +77,7 @@ def test_abstaining_cannot_inflate_consensus() -> None:
 def test_quorum_below_min_effective_forces_manual_review() -> None:
     """D-93：quorum 拦的是**缺席**（执行失败弃权），不是「判断性弃权」。
 
-    本用例此前用裸 `decision="abstain"` 表达缺席——那正是被修正的混淆：判断性弃权是一次
-    **交付**（专家说「我判断：无法结论」），只有服务端兜底的弃权才算缺席。
+    判断性弃权是一次**交付**（专家说「我判断：无法结论」），只有服务端兜底的弃权才算缺席。
     """
     weights = {"E01": 1.0, "E02": 1.0, "E03": 1.0}
     opinions = {
@@ -474,7 +471,7 @@ def test_peer_claim_change_counts_as_movement() -> None:
 
 class _FixedPointLLM:
     """Same opinions on every round: the loop reaches a *fixed point* rather
-    than converging — exactly the death spiral ``max_rounds`` used to hide."""
+    than converging, which ``max_rounds`` alone would merely hide."""
 
     def __init__(self, *, vary_rationale: bool = False) -> None:
         self.vary_rationale = vary_rationale
@@ -487,8 +484,7 @@ class _FixedPointLLM:
         user: str,
         meta: LLMCallMeta | None = None,
     ) -> LLMResult:
-        # The round counter used to be parsed back out of the prompt's CTX
-        # header; it now arrives out of band (design §12 1f).
+        # The round counter arrives out of band in ``meta`` (design §12 1f).
         round_no = (meta.round if meta is not None else 0) or 1
         cited = sorted(set(re.findall(r"E-[0-9a-f]{12}", user))) or [EID]
         rationale = f"第 {round_no} 轮的考虑" if self.vary_rationale else "同样的考虑"
@@ -537,9 +533,9 @@ def test_a_moving_round_is_not_mistaken_for_a_stall() -> None:
     """Same decisions every round, but the rationale keeps changing — so the
     next prompt really does differ and this is not a fixed point.
 
-    终态是「交人 + 附条件」：全员 `revise`、无人反对。D-95 曾把这记成独立状态 `conditional`，
-    D-96 收成 `manual_review` + `review_reason="conditions_only"`——状态值不再分叉，但**原因**
-    仍然说清了「这不是分歧未决，而是四位专家一致认为方向可行、只是各自列出了前置条件」。
+    终态是 `manual_review` + `review_reason="conditions_only"`：状态值不区分「附条件」与
+    「分歧」，但**原因**说清了「这不是分歧未决，而是四位专家一致认为方向可行、只是各自列出了
+    前置条件」。
     """
     result = _run_offline(_FixedPointLLM(vary_rationale=True))
 

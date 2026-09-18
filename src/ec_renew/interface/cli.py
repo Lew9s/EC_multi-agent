@@ -6,8 +6,8 @@ stateless run** (fresh evidence registry, fresh RunContext). That is the
 turns except the explicit session snapshot.
 
 The LLM and the retriever are built **once** per process and shared across
-turns. Building them per turn used to open a new Neo4j driver and a new httpx
-client every time, and nothing ever closed them.
+turns, and both are closed on exit (see ``_repl``): per-turn construction would
+open a new Neo4j driver and a new httpx client every turn.
 """
 
 from __future__ import annotations
@@ -116,8 +116,8 @@ async def _one_turn(
         print(f"[检索] {retriever_notes[0]}")
 
     # Built from the run's fields, never from the rendered report: its first line
-    # is a constant title, so deriving the summary from it stored the same string
-    # on every turn. See session.summarize.
+    # is a constant title, so a report-derived summary would carry no per-turn
+    # information. See session.summarize.
     session.append(summarize(result, turn=len(session.turns) + 1))
 
 

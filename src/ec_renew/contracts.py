@@ -303,9 +303,7 @@ class AnonymizedClaim(BaseModel):
 
     Deliberately has no ``discipline`` field. ``E01``..``E06`` map one-to-one
     onto the six experts, so carrying it would be a de-facto identity
-    disclosure — forbidden by D-50 and §8.4.5. Before this type existed, the
-    only thing keeping identity out of a peer's prompt was the fact that
-    ``render_task`` happened not to print the field.
+    disclosure — forbidden by D-50 and §8.4.5.
 
     The field set *is* the guarantee: adding a field to ``Claim`` (which stays
     inside the run state, where discipline is legitimate research data) does
@@ -509,8 +507,7 @@ class SessionSnapshot(BaseModel):
     anchor_request: str
     recent_turns: tuple[TurnSummary, ...] = ()
     user_constraints: tuple[str, ...] = ()
-    #: 上一版方案（D-99 / §5.9）：迭代回路要「改文本」，就必须拿得到被改的那一版。
-    #: 此前会话只带 `TurnSummary.conclusion` 的散文，不够。
+    #: 方案的最新一版（D-99 / §5.9）：迭代回路要「改文本」，就必须拿得到被改的那一版。
     latest_plan: PlanDraft | None = None
 
 
@@ -524,7 +521,7 @@ class RunInput(BaseModel):
     session: SessionSnapshot = Field(
         default_factory=lambda: SessionSnapshot(session_id="default", anchor_request="")
     )
-    #: 用户对**上一版方案**的逐条意见（D-99 / §5.9 的迭代回路）。非空即表示这一轮走的是
+    #: 用户对**最近一版方案**的逐条意见（D-99 / §5.9 的迭代回路）。非空即表示这一轮走的是
     #: 「只迭代方案文本」的路径——不重跑专家评审（重评要动事实基线，那是另一条回路）。
     plan_feedback: list[str] = Field(default_factory=list)
 
@@ -675,17 +672,16 @@ class RunResult(BaseModel):
     consensus_score: float = 0.0
     #: 收敛状态（D-82 / D-93 / D-95 / **D-96**）。三个取值对应**互不相同的补救动作**：
     #: ``approved`` 交付；``stalled`` 流程已无信息增益（不动点）；``manual_review`` 交人裁定。
-    #: **「交人」内部不再细分状态值**：曾用 ``conditional``（附条件交付）与
-    #: ``insufficient_evidence``（证据不足）区分交人的两种理由，但这两条信息本来就在专家意见里
-    #: （有人反对 / 全部附条件 / 全员弃权），为它们各加一个状态取值只会让每个消费者都多一个
-    #: 必须分支的取值。现在统一由 :data:`ReviewReason` 承载（D-96 推翻 D-93 / D-95 的取值部分）。
+    #: **「交人」内部不细分状态值**：交人的理由（有人反对 / 全部附条件 / 全员弃权）本来就在
+    #: 专家意见里，为它们各加一个状态取值只会让每个消费者都多一个必须分支的取值，因此统一由
+    #: :data:`ReviewReason` 承载（D-96）。
     consensus_status: Literal["approved", "manual_review", "stalled"] = "manual_review"
     #: 交人的**原因**（D-96），仅在 ``consensus_status == "manual_review"`` 时有值。交付与停滞
     #: 不是「交人」，所以不带原因标签——`None` 与「原因未知」必须分得开。
     review_reason: ReviewReason | None = None
     stall: StallReport = Field(default_factory=StallReport)
-    #: 结构化的证据缺口清单（D-94）。此前「缺什么」只沉在渲染文本里，机器消费者拿不到；
-    #: 现在它是契约的一部分：每条都可直接喂给检索端（``RetrieverPort.search()`` 落地后即刻生效）。
+    #: 结构化的证据缺口清单（D-94）：它是契约的一部分，而不是只沉在渲染文本里，
+    #: 因此每条都可直接喂给检索端（``RetrieverPort.search()`` 落地后即刻生效）。
     evidence_requests: list[EvidenceRequest] = Field(default_factory=list)
     #: 交付物必须携带的**前置条件**（D-95 / D-96）：专家写下的「施工/采购前必须满足什么」，去重
     #: 排序后的汇总。它们与终态**无关地**跟随交付物——交付时它是交付条件，交人时它是人裁定的

@@ -42,8 +42,8 @@ def _result(
     return RunResult(
         request=request,
         normalized_request=request,
-        # The rendered report always opens with this constant title — it is the
-        # whole reason the old derivation stored nothing.
+        # The rendered report always opens with this constant title, so a
+        # summary derived from it would store nothing per-turn.
         conclusion="# 工程变更方案\n\n- 状态：approved\n",
         consensus_status=status,  # type: ignore[arg-type]
         consensus_score=score,
@@ -61,10 +61,10 @@ def _result(
 
 
 def test_stored_conclusion_comes_from_fields_not_from_the_rendered_title() -> None:
-    """Regression: ``result.conclusion.splitlines()[0]`` is ``# 工程变更方案``.
+    """``result.conclusion.splitlines()[0]`` is the constant ``# 工程变更方案``.
 
-    The CLI used to derive the stored summary that way, so *every* turn of a
-    session recorded the same constant and the accumulator remembered nothing.
+    A stored summary derived from it would be the same on *every* turn, and the
+    accumulator would remember nothing.
     """
     result = _result(status="stalled", score=0.5, rounds=3, warnings=("stalled",))
 
@@ -81,8 +81,8 @@ def test_stored_conclusion_comes_from_fields_not_from_the_rendered_title() -> No
 
 
 def test_different_outcomes_store_different_conclusions() -> None:
-    """The old derivation made this impossible to satisfy: every run stored the
-    same constant, so the accumulator could not tell two turns apart.
+    """Different outcomes must store different conclusions — otherwise the
+    accumulator cannot tell two turns apart.
 
     (Two runs *may* legitimately agree — but then they agree on the fields, not
     because the stored text is a constant.)

@@ -63,7 +63,7 @@ def scratch_repo() -> Iterator[Path]:
 
 
 def test_secret_scan_reports_clean_even_when_stdout_cannot_encode_the_mark() -> None:
-    """先失败后通过：管道 + GBK 时，扫描干净却因打印 ``✔`` 而 exit 1。
+    """管道 + GBK 时，扫描干净必须仍然 exit 0，不能因打印 ``✔`` 而失败。
 
     退出码是钩子唯一读得到的信号，读错一次就会让**每一次提交**都被拦下，
     并把原因误报成「疑似密钥泄漏」。
@@ -78,10 +78,10 @@ def test_secret_scan_reports_clean_even_when_stdout_cannot_encode_the_mark() -> 
 
 
 def test_secret_scan_still_fails_on_a_real_leak(scratch_repo: Path) -> None:
-    """修编码不能把闸门修成「永远绿」：真泄漏必须仍然 exit 1。
+    """闸门不能是「永远绿」：真泄漏必须 exit 1。
 
-    这条同时补上一个覆盖空白：在本用例之前，没有任何一条测试验证过这个全项目
-    最要紧的脚本**真的抓得到东西**（它此前只被「跑起来没崩」间接覆盖）。
+    这是全项目最要紧的脚本，必须有用例验证它**真的抓得到东西**，
+    而不只是「跑起来没崩」。
     """
     # 刻意写成拼接而非整条字面量：否则本文件自身会被判据 2 命中，
     # 让上面那条「扫描干净」的用例红在这个 fixture 上。
@@ -102,8 +102,7 @@ def test_a_shebang_implies_the_executable_bit() -> None:
     """``ruff`` 的 EXE001 只在 Linux 触发，这里给它做一个本地代理。
 
     Windows 看不到 POSIX 可执行位，于是「有 shebang、但 git 索引里是 100644」的文件
-    在本地永远绿、只在 CI 红 —— AGENTS.md §1.3 专门警告过这个坑，而 PR #7 的第一轮
-    CI 正是这样红的（`scripts/_console.py` 多带了一个 shebang）。这里改从 git 索引读
+    在本地永远绿、只在 CI 红 —— AGENTS.md §1.3 专门警告过这个坑。这里改从 git 索引读
     模式，让这个陷阱在本地就可见。
 
     局限：只看**已跟踪**的文件。刚建好还没 `git add` 的脚本不在索引里，覆盖不到 ——

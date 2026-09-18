@@ -246,7 +246,7 @@ class MemoryService:
         if previous is not None:
             revision = RevisionContext(
                 own_previous=previous,
-                new_evidence_ids=[],  # demo: baseline does not expand mid-run
+                new_evidence_ids=[],  # baseline does not expand mid-run
                 feedback=ReviewFeedback(
                     round=round_no,
                     consensus_score=consensus_score,

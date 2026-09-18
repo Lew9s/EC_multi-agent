@@ -2,8 +2,8 @@
 
 这个文件钉住五件事：
 
-1. **可交付终态才有方案**：`approved` 产出方案；`manual_review` **不产出**（它走的是「回中段再跑」，
-   不是交付路径，D-99）；
+1. **只有可交付终态才产出方案**：`approved`，以及 `manual_review` + `conditions_only`
+   （无人明确反对 ⇒ 有方向可写，标未定稿，D-101）；其余交人原因与 `stalled` 都不产出；
 2. **降级显式**：没有可用模型 / 契约重试耗尽 → 确定性模板，`plan_source="template"`（P5）；
 3. **必须章节无支撑 → 不得交付**：拒绝整份方案、降 `manual_review`、`review_reason="unsupported_plan"`
    （§5.7 硬约束）；
@@ -181,8 +181,8 @@ def test_a_manual_review_run_gets_no_plan() -> None:
 def test_plan_eligibility_is_a_closed_rule() -> None:
     """D-98 + **D-101**：出方案的终态是闭集，逐个数出来。
 
-    `conditions_only` 之所以要出：真实模型在这套语料上从不 `approve`（4 次真实 run 都是
-    三位专家一致 `revise`、支持度 0.50）。若只认 `approved`，框架在真实运行里永不产出交付物。
+    `conditions_only` 之所以要出：只认 `approved` 的话，专家一致 `revise`、无人反对的请求
+    （真实语料上的常见形态）永远拿不到交付物。
     """
     from ec_renew.workflow import plan_eligible
 
