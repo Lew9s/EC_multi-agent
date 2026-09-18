@@ -17,7 +17,7 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from neo4j import GraphDatabase
+from neo4j import READ_ACCESS, GraphDatabase
 
 from ..config import Settings
 from ..contracts import (
@@ -27,6 +27,7 @@ from ..contracts import (
     GraphExpansion,
 )
 from ..errors import PermanentExternalError, TransientError
+from .cypher_guard import validate_read_only
 
 # --------------------------------------------------------------------------- #
 # Static mapping (demo shortcut)
@@ -262,8 +263,22 @@ class Neo4jRetriever:
 
     # -- exception translation (the only place neo4j.* is visible) -------- #
     def _run(self, query: str, **params: Any) -> list[dict[str, Any]]:
+        """执行一条**只读**查询。
+
+        这是读路径上**唯一**的执行入口，两道防线都在这里：
+
+        1. `validate_read_only`：语句形态校验（fail-closed），失败抛 ``InvalidRequest``，
+           调用方据此显式降级（P5）。它**放在 try 之外**——否则会被下面的异常翻译
+           误报成 Neo4j 故障；
+        2. ``READ_ACCESS`` 会话：服务端保证。规则是黑名单（可能漏），只读事务是白名单。
+
+        图在摄取完成后是只读对象，写操作只属于摄取（`graph_store.py`）。
+        """
+        validate_read_only(query)
         try:
-            with self._driver.session(database=self._database) as session:
+            with self._driver.session(
+                database=self._database, default_access_mode=READ_ACCESS
+            ) as session:
                 return [dict(record) for record in session.run(query, **params)]
         except Exception as exc:  # neo4j.* -> our hierarchy
             name = type(exc).__name__

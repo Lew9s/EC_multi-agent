@@ -34,8 +34,10 @@ LAYERS: dict[str, int] = {
     "ec_renew.interface": 5,
 }
 
-#: Cypher 只允许出现在这两个文件里（AGENTS.md §1.2）。
-CYPHER_FILES = frozenset({"rag/graph.py", "rag/graph_store.py"})
+#: Cypher 只允许出现在这三个文件里（AGENTS.md §1.2），且三者都在 `rag/` 内：
+#: `graph.py` 读查询、`graph_store.py` 写查询、`cypher_guard.py` **关键字守卫**——
+#: 守卫必须列出关键字名，因此与查询文件同属 Cypher-aware。业务层仍不得出现 Cypher。
+CYPHER_FILES = frozenset({"rag/graph.py", "rag/graph_store.py", "rag/cypher_guard.py"})
 _CYPHER = re.compile(
     r"\b(?:MATCH|MERGE|UNWIND|FOREACH)\b|DETACH\s+DELETE|CREATE\s+CONSTRAINT",
     re.IGNORECASE,
@@ -115,7 +117,7 @@ def test_ports_only_depends_on_contracts() -> None:
     assert set(_internal_imports("ec_renew.ports", SRC / "ports.py")) <= {"ec_renew.contracts"}
 
 
-def test_cypher_stays_in_the_two_allowed_files() -> None:
+def test_cypher_stays_in_the_allowed_files() -> None:
     """扫**字符串字面量**而不是全文：注释或文档里提到 MATCH 不算写 Cypher。"""
     offenders: list[str] = []
     for module, path in _modules():
