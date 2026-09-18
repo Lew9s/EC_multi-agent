@@ -81,6 +81,13 @@ python -m pip install -i https://pypi.org/simple -e ".[dev]"
 > 所以 dev 依赖只写成 `[project.optional-dependencies]`（extra）。
 > **本地绿不等于 CI 绿**；改动构建/CI 时以 CI 结果为准。
 
+> ⚠ **集成用例不得共享可变资源**。并发的两个 `pytest` 进程会在外部服务上互相删除对方
+> 正在使用的对象：固定集合名 + `recreate=True` → `404 Collection ... doesn't exist`；
+> 固定单号前缀 + teardown `purge` → 对方断言时数到 0 条。这类失败**每次失败的用例集合
+> 都不同**（谁先谁后不确定），极难排查。凡是要落到外部服务或磁盘上的测试资源
+> （集合名、单号前缀、临时文件），一律**按进程隔离**（进程号或 uuid 后缀），
+> teardown 只回收自己那一份。宁可多发一份数据，也不要给共享资源排队加锁。
+
 ---
 
 ## 2. 分支与提交

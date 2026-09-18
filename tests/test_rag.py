@@ -60,8 +60,9 @@ SEPARATOR = r"!@#\$%\^&\*"
 _PROCESS_TAG = str(os.getpid())
 SCRATCH_COLLECTION = f"ec_renew_pytest_{_PROCESS_TAG}"
 SAMPLE_COLLECTION = f"ec_renew_pytest_sample_{_PROCESS_TAG}"
-# 合成语料的单号前缀：既与真实语料区分，也是图侧回收的依据
-SYNTHETIC_PREFIX = "S-"
+# 合成语料的单号前缀：既与真实语料区分，也是图侧回收的依据。同样按进程区分——
+# 否则一个进程的 teardown purge 会删掉另一个进程尚在断言的节点。
+SYNTHETIC_PREFIX = f"S{_PROCESS_TAG}-"
 
 REAL_CORPUS = Path(CORPUS)
 SAMPLE_CORPUS = Path("tests/fixtures/sample_change_orders.txt")
@@ -385,14 +386,32 @@ def _scratch_settings():
     )
 
 
+def _per_process_corpus() -> Path:
+    """把合成语料复制成**本进程私有**的一份，单号前缀带进程号。
+
+    图侧只有一个 database（Neo4j 社区版），集成用例与真实数据同库。两个 pytest 进程若共用
+    同一批 ``S-`` 单号，一个进程的 teardown ``purge`` 会删掉另一个进程尚在断言的节点。
+    复制 + 改前缀之后每个进程只碰自己的节点。副本落在 ``.cache/``（已在 .gitignore 内）。
+    """
+    target = Path(".cache") / f"sample_change_orders_{_PROCESS_TAG}.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # 该 fixture 里 ``S-`` 只出现在单号里（``单号:S-01`` 等），整体替换即安全。
+    target.write_text(
+        SAMPLE_CORPUS.read_text(encoding="utf-8").replace("S-", SYNTHETIC_PREFIX),
+        encoding="utf-8",
+    )
+    return target
+
+
 def _sample_settings():
-    """把摄取指向合成语料：无语料环境下也能跑通整条链路。"""
+    """把摄取指向**本进程私有**的合成语料副本：无语料环境下也能跑通整条链路。"""
+    corpus = _per_process_corpus()
     return base_settings.model_copy(
         update={
             "qdrant_collection": SAMPLE_COLLECTION,
             "embedding_dimensions": 256,
-            "data_dir": SAMPLE_CORPUS.parent,
-            "corpus_file": SAMPLE_CORPUS.name,
+            "data_dir": corpus.parent,
+            "corpus_file": corpus.name,
         }
     )
 
@@ -480,7 +499,7 @@ def sample_collection():
     assert report.vector["points"] == 8
     assert report.graph["nodes"]["CHANGE_ORDER"] == 8
     # 合成语料 8 张单覆盖 6 个变更组（S-02 / S-03 各含 2 张子单）
-    assert len({o.group_key for o in load_change_orders(SAMPLE_CORPUS)}) == 6
+    assert len({o.group_key for o in load_change_orders(_per_process_corpus())}) == 6
 
     # 幂等
     again = ingest_sync(cfg, offline=True)
