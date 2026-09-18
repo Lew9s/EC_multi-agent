@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -53,8 +54,12 @@ from ec_renew.rag.retriever import rank_graph_rows, rrf_fuse
 
 CORPUS = "data/zahuo.txt"
 SEPARATOR = r"!@#\$%\^&\*"
-SCRATCH_COLLECTION = "ec_renew_pytest"
-SAMPLE_COLLECTION = "ec_renew_pytest_sample"
+# 集成用例的临时资源名**按进程区分**：固定名字下，并发的第二个 pytest 进程会
+# `recreate=True` 删掉第一个进程正在读的集合（Qdrant 404），或 purge 掉它尚在断言的
+# 合成节点。进程号后缀让两处共享状态互不相干，CI 分片与本地多开都能并行。
+_PROCESS_TAG = str(os.getpid())
+SCRATCH_COLLECTION = f"ec_renew_pytest_{_PROCESS_TAG}"
+SAMPLE_COLLECTION = f"ec_renew_pytest_sample_{_PROCESS_TAG}"
 # 合成语料的单号前缀：既与真实语料区分，也是图侧回收的依据
 SYNTHETIC_PREFIX = "S-"
 
