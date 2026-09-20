@@ -128,6 +128,14 @@ class _ScriptedLLM:
         user: str,
         meta: LLMCallMeta | None = None,
     ) -> LLMResult:
+        if purpose == "meta_decision":
+            # 决策层给一个「不补差集」的合法决策：本用例观察的是振荡，激活集必须
+            # 完全由规则骨架决定，`calls` 也仍然只按专家计数。
+            return LLMResult(
+                content=json.dumps({"add_experts": [], "rationale": "scripted：不补差集"}),
+                model="scripted",
+                usage=Usage(calls=1),
+            )
         round_no = meta.round if meta is not None else 1
         expert = meta.expert if meta is not None else "E01"
         self.calls[expert] = self.calls.get(expert, 0) + 1

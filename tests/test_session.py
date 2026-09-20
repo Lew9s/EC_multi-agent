@@ -220,3 +220,13 @@ def test_no_session_history_reaches_a_sub_agent_prompt() -> None:
     assert expert_prompts, "前提：本轮确实派发过专家"
     for prompt in expert_prompts:
         assert _SENTINEL not in prompt
+
+    # 反向的一半同样要钉住：会话历史**必须**到达那个唯一合法读者（元智能体的决策层，
+    # §8.4.5 / D-102）。只断言「谁都没看到」，等于允许这条通道静默断掉。
+    decision_prompts = [
+        prompt
+        for prompt, purpose in zip(llm.prompts, llm.purposes)
+        if purpose == "meta_decision"
+    ]
+    assert decision_prompts, "前提：决策层跑过一次"
+    assert any(_SENTINEL in prompt for prompt in decision_prompts)
