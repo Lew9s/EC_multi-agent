@@ -16,16 +16,24 @@ import argparse
 import asyncio
 import sys
 import uuid
+from collections.abc import Iterable
 
 from ..agents.memory import EvidenceRegistry
 from ..config import settings
-from ..contracts import HumanDecision, HumanProvidedFact, RunInput
+from ..contracts import DISCIPLINE_NAMES, HumanDecision, HumanProvidedFact, RunInput
 from ..llm import FakeLLM
 from ..observability import JsonlEventLog
 from ..ports import RunContext
 from ..rag import InMemoryRetriever
 from ..session import SessionState, summarize
 from ..workflow import run
+
+_EXIT_COMMANDS = frozenset({"/exit", "/quit", "exit", "quit"})
+
+
+def _expert_labels(expert_ids: Iterable[str]) -> str:
+    """专业标识 -> 人可读的专业名；未知标识原样透出，不静默丢弃。"""
+    return "、".join(DISCIPLINE_NAMES.get(e, e) for e in expert_ids)
 
 
 def _build_llm(offline: bool):
@@ -59,7 +67,7 @@ async def _make_human_callback(review):
     print("=" * 72)
     print(f"系统理解：{review.understood_request}")
     print(f"缺失信息：{'、'.join(review.missing)}")
-    print(f"建议专家：{'、'.join(review.candidate_experts)}")
+    print(f"建议专家：{_expert_labels(review.candidate_experts)}")
     for line in review.questions:
         print(f"  ? {line}")
 
@@ -143,7 +151,7 @@ async def _repl(
             await _one_turn(session, once, llm, retriever, notes, verbose)
             return
 
-        print("工程变更方案生成 · 实验版（输入 exit 退出）")
+        print("工程变更方案生成 · 实验版（输入 /exit 退出）")
         while True:
             try:
                 request = (await asyncio.to_thread(input, "\n变更请求> ")).strip()
@@ -151,7 +159,7 @@ async def _repl(
                 break
             if not request:
                 continue
-            if request.lower() in {"exit", "quit"}:
+            if request.lower() in _EXIT_COMMANDS:
                 break
             if session.pending_run_id:
                 print("上一个请求仍在等待确认，请先完成它。")
