@@ -433,18 +433,24 @@ def test_a_run_reports_the_guarded_acts() -> None:
 
 
 def test_meta_rationale_never_reaches_a_sub_agent_prompt() -> None:
-    """D-76：`ActivationPlan.rationale` 只进事件日志与审计，永不进子智能体 prompt。"""
-    prompts: list[str] = []
+    """D-76：`ActivationPlan.rationale` 只进事件日志与审计，永不进子智能体 prompt。
+
+    决策层（D-102）看到骨架是**设计如此**——它就是元智能体自己的提示词；D-76 挡的是
+    子智能体（专家与方案撰写者），所以这里只检查这两类 purpose。
+    """
+    prompts: list[tuple[str, str]] = []
 
     class _RecordingLLM(FakeLLM):
         async def complete(self, **kwargs: object):  # type: ignore[override]
-            prompts.append(str(kwargs.get("user", "")))
+            prompts.append((str(kwargs.get("purpose", "")), str(kwargs.get("user", ""))))
             return await super().complete(**kwargs)  # type: ignore[arg-type]
 
     asyncio.run(run(RunInput(request=REQUEST), _context(llm=_RecordingLLM())))
 
     assert prompts, "没捕获到任何 prompt，这条用例失去意义"
-    assert not any("规则骨架" in prompt for prompt in prompts)
+    sub_agent = [user for purpose, user in prompts if purpose in {"expert", "plan"}]
+    assert sub_agent, "前提：本轮确实派发过子智能体"
+    assert not any("规则骨架" in prompt for prompt in sub_agent)
 
 
 def test_an_evidence_request_is_reported_unsatisfied() -> None:
