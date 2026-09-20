@@ -31,6 +31,7 @@ from ..contracts import (
     ExpertTask,
     GuardVerdict,
     MemoryView,
+    MetaDecision,
     PlanDraft,
     RoundFold,
     StallReport,
@@ -42,7 +43,7 @@ from ..errors import BudgetExceeded, InvariantViolation, StepLimitExceeded
 from ..ports import RunContext
 from .guard import Guard, LoopState
 from .memory import MemoryService
-from .meta import gap_payload
+from .meta import DECISION_NODE, MetaDecisionContext, gap_payload, run_decision
 from .skills.expert_review import abstain_opinion, run_expert
 from .skills.plan_writing import PlanContext
 from .skills.plan_writing import run_planner as run_plan_skill
@@ -313,6 +314,39 @@ class AgentRuntime:
             self._ctx.events.emit(
                 "failure",
                 node="planner",
+                cause_type=type(exc).__name__,
+                message=str(exc)[:200],
+            )
+            self._done(step, outcome="failed")
+            return None, Usage(calls=1)
+
+    # ------------------------------------------------------------------ #
+    # 决策层（Q-06 三明治第二层 / D-102）：一次 L0 调用
+    # ------------------------------------------------------------------ #
+    async def decide_activation(
+        self, *, context: MetaDecisionContext, timeout_s: float = 60.0
+    ) -> tuple[MetaDecision | None, Usage]:
+        """让 LLM 补一次差集。**失败返回 ``None``**（值）——外环据此回落到纯规则骨架。
+
+        与 ``draft_plan`` 同一条纪律：「这次没给出可用决策」是预期内的结果，不该让一次
+        评审整份崩掉；真正的引擎错误照旧往上抛。降级**必须显式**（P5），所以由外环落事件。
+        """
+        step = self._step(node=DECISION_NODE, round_no=1, kind="llm")
+        try:
+            async with asyncio.timeout(timeout_s):
+                decision, usage = await run_decision(
+                    context, self._ctx.llm, events=self._ctx.events
+                )
+            self._done(step, produced=list(decision.add_experts))
+            return decision, usage
+        except asyncio.CancelledError:
+            raise
+        except (InvariantViolation, BudgetExceeded, StepLimitExceeded):
+            raise
+        except Exception as exc:  # noqa: BLE001 — 有意的「异常转状态」点，见 docstring
+            self._ctx.events.emit(
+                "failure",
+                node=DECISION_NODE,
                 cause_type=type(exc).__name__,
                 message=str(exc)[:200],
             )

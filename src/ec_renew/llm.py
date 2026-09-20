@@ -144,6 +144,18 @@ class FakeLLM:
             content = json.dumps(self._intent(user), ensure_ascii=False)
         elif purpose == "expert":
             content = json.dumps(self._opinion(meta, user), ensure_ascii=False)
+        elif purpose == "meta_decision":
+            # 离线**不补差集**：激活集与证据子集完全由规则骨架决定，因此离线 run 的产物与
+            # 决策层接入之前逐字一致（差异只留在真实模型链路上）。
+            content = json.dumps(
+                {
+                    "add_experts": [],
+                    "weights": {},
+                    "evidence_scope": {},
+                    "rationale": "离线适配器：不补差集",
+                },
+                ensure_ascii=False,
+            )
         else:
             content = (meta.expert if meta is not None else "") or "system"
 

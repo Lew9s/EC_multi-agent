@@ -483,6 +483,22 @@ class ActivationPlan(BaseModel):
     cross_domain_flags: list[str] = Field(default_factory=list)
 
 
+class MetaDecision(BaseModel):
+    """LLM 在「三明治」第二层给出的**差集提案**（Q-06 / §5.4.8 / D-102）。
+
+    它只表达「规则骨架没覆盖到什么」：**不能删**任何骨架已激活的专家——合并是代码
+    （``meta.merge_decision``）的事，合并结果照旧要过守卫（D-71）。字段全是闭集：
+    ``add_experts`` 只能是 ``EXPERT_IDS``；``evidence_scope`` 的键只能是激活专家，
+    值只能是渲染进提示词的那批证据 id——编出来的 id 在解析层就被退回（§5.4「元智能体
+    不得编造 evidence_id」），而不是被静默接受。
+    """
+
+    add_experts: list[str] = Field(default_factory=list)
+    weights: dict[str, float] = Field(default_factory=dict)
+    evidence_scope: dict[str, list[str]] = Field(default_factory=dict)
+    rationale: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # Session (multi-turn)
 # --------------------------------------------------------------------------- #

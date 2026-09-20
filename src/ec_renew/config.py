@@ -98,6 +98,9 @@ class Settings(BaseModel):
     max_rounds: int = 3
     consensus_threshold: float = 0.6
     min_effective_experts: int = 3
+    # 元智能体的决策方式（Q-06 的「三明治」/ D-102）：llm = 规则骨架 + LLM 只补差集；
+    # rule = 纯骨架，不发起那次调用。降级不靠这个开关——LLM 不可用时一律自动退回骨架。
+    meta_decision: str = "llm"  # llm | rule
 
     # ---- Cache / events --------------------------------------------------
     cache_enabled: bool = True
@@ -163,6 +166,7 @@ class Settings(BaseModel):
             max_rounds=_i("MAX_ROUNDS", 3),
             consensus_threshold=_f("CONSENSUS_THRESHOLD", 0.6),
             min_effective_experts=_i("MIN_EFFECTIVE_EXPERTS", 3),
+            meta_decision=_s("META_DECISION", "llm"),
             cache_enabled=_b("CACHE_ENABLED", True),
             cache_dir=Path(_s("CACHE_DIR", ".cache/llm")),
             events_path=Path(_s("EVENTS_PATH", "logs/events.jsonl")),

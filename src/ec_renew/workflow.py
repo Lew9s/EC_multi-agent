@@ -27,7 +27,12 @@ from functools import partial
 from .agents.experts import select_experts
 from .agents.guard import Guard
 from .agents.memory import MemoryService, collect_hard_constraints
-from .agents.meta import RuleSkeleton
+from .agents.meta import (
+    MAX_DECISION_EVIDENCE,
+    MetaDecisionContext,
+    RuleSkeleton,
+    merge_decision,
+)
 from .agents.runtime import META_SPEC, PLANNER_SPEC, AgentRuntime
 from .agents.skills.plan_writing import PlanContext
 from .config import settings as default_settings
@@ -37,6 +42,7 @@ from .contracts import (
     EXPERT_IDS,
     PLAN_HEADING_LABELS,
     REQUIRED_PLAN_HEADINGS,
+    ActivationPlan,
     AssuranceLevel,
     EntityRef,
     EvidenceBundle,
@@ -54,7 +60,9 @@ from .contracts import (
     ReviewReason,
     RunInput,
     RunResult,
+    SessionSnapshot,
     SubQuestion,
+    Usage,
 )
 from .ports import RunContext as _RunContext
 
@@ -481,6 +489,33 @@ def build_plan_context(
     )
 
 
+def build_decision_context(
+    *,
+    request: str,
+    skeleton: ActivationPlan,
+    historical_disciplines: Sequence[str],
+    evidence: Sequence[tuple[str, str]],
+    session: SessionSnapshot,
+) -> MetaDecisionContext:
+    """投影出决策层能看到的一切（§5.4.3 的 L1/L2/L3）。**确定性**：同输入同 prompt。
+
+    会话层（§8.4.5 的唯一读者是元智能体）在这里进入决策提示词；决策的输出是闭集 id，
+    所以它没有通道流到子智能体。证据按 id 排序后**截断**到 ``MAX_DECISION_EVIDENCE``：
+    L3 是有界视图，决策层只需要「有哪些证据、各讲什么」。
+    """
+    return MetaDecisionContext(
+        request=request,
+        skeleton=skeleton,
+        historical_disciplines=tuple(historical_disciplines),
+        evidence=tuple(sorted(evidence)[:MAX_DECISION_EVIDENCE]),
+        anchor_request=session.anchor_request,
+        recent_conclusions=tuple(
+            f"第 {turn.turn} 轮：{turn.conclusion[:200]}" for turn in session.recent_turns[-3:]
+        ),
+        user_constraints=tuple(session.user_constraints),
+    )
+
+
 def plan_guard(
     draft: PlanDraft,
     *,
@@ -798,6 +833,7 @@ async def run(
     min_effective_experts: int | None = None,
     top_k: int | None = None,
     weights: dict[str, float] | None = None,
+    meta_decision: str | None = None,
 ) -> RunResult:
     cfg = default_settings
     max_rounds = max_rounds or cfg.max_rounds
@@ -806,6 +842,8 @@ async def run(
         cfg.min_effective_experts if min_effective_experts is None else min_effective_experts
     )
     top_k = top_k or cfg.top_k
+    # 决策方式（Q-06 三明治）：llm = 骨架 + LLM 补差集；rule = 纯骨架。
+    decision_mode = meta_decision or cfg.meta_decision
 
     warnings: list[str] = []
     #: 人类提供的事实原文（D-28）：方案撰写者要看到它们，因为它们是一等证据。
@@ -885,6 +923,61 @@ async def run(
     # ═══ 中段：元智能体的 think-act-observe 循环（内环，§5.4.1） ═══════════ #
     # 裁定权在外环：共识与停滞判定以回调注入（D-73），因此内环不必 import 外环。
     runtime = AgentRuntime(ctx, guard=guard, memory=memory, run_id=ctx.run_id)
+
+    # --- 决策部分（Q-06 三明治 / D-102）：规则先出骨架，LLM 只补差集 ------------- #
+    # 只在**首轮之前**跑一次：激活决策做一次就够，每轮重做会让激活集自己振荡（D-102）。
+    # LLM 不可用、契约越界或显式关掉 → 退回纯骨架，并且**说出来**（P5）。
+    skeleton_plan = skeleton.plan(
+        request=intent.normalized_request,
+        historical_disciplines=intent.historical_disciplines,
+        baseline_ids=ctx.registry.all_ids(),
+        active_override=active_override,
+        weights_override=weights,
+    )
+    plan_override: ActivationPlan | None = None
+    decision_usage = Usage()
+    if decision_mode == "llm":
+        decision, decision_usage = await runtime.decide_activation(
+            context=build_decision_context(
+                request=intent.normalized_request,
+                skeleton=skeleton_plan,
+                historical_disciplines=intent.historical_disciplines,
+                evidence=[(ref.evidence_id, ref.gist) for ref in ctx.registry.refs(ctx.registry.all_ids())],
+                session=run_input.session,
+            )
+        )
+        plan_override, corrections = merge_decision(
+            skeleton_plan, decision, baseline_ids=ctx.registry.all_ids()
+        )
+        if decision is None:
+            warnings.append("meta_decision_failed")
+            ctx.events.emit(
+                "degradation",
+                level="rule_skeleton",
+                reason="决策层不可用或输出越界，已回落到纯规则骨架",
+            )
+        else:
+            ctx.events.emit(
+                "meta_decision_merged",
+                active=list(plan_override.active_experts),
+                weights=dict(plan_override.weights),
+                corrections=list(corrections),
+                scope_sizes={e: len(v) for e, v in plan_override.evidence_scope.items()},
+                baseline=len(ctx.registry.all_ids()),
+            )
+            # 证据子集裁剪**必须落事件**（§5.4.3 的 L3）：它决定这一轮专家看到什么。
+            trimmed = {
+                expert: len(ids)
+                for expert, ids in plan_override.evidence_scope.items()
+                if len(ids) < len(ctx.registry.all_ids())
+            }
+            if trimmed:
+                ctx.events.emit(
+                    "evidence_scope_trimmed", round=1, kept=trimmed, baseline=len(ctx.registry.all_ids())
+                )
+    else:
+        ctx.events.emit("meta_decision_skipped", mode=decision_mode)
+
     loop = await runtime.run_meta(
         META_SPEC,
         think=partial(
@@ -893,6 +986,7 @@ async def run(
             historical_disciplines=intent.historical_disciplines,
             active_override=active_override,
             weights_override=weights,
+            plan_override=plan_override,
         ),
         closing=skeleton.closing,
         request=intent.normalized_request,
@@ -908,6 +1002,8 @@ async def run(
     )
     warnings.extend(loop.warnings)
     stall = loop.stall
+    # 决策层那一次调用的用量也计进本 run：它是内环的一部分，不是外环的旁路。
+    loop.usage = loop.usage + decision_usage
 
     # 证据请求：检索端口尚未实现 `search()`（docs/rag.md §9 的双接口只实现了 prefetch）。
     # **不静默**：显式标注未满足并落事件（P5）。
