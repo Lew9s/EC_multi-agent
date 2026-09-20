@@ -177,7 +177,7 @@ python scripts/check_secrets.py
 | `agents/experts.py` | 六类专家（L0）+ 规则表选专家 + prompt 构造 + 契约重试 |
 | `agents/runtime.py` | `AgentRuntime`：元/子智能体**共用**的 think-act-observe 执行入口；`StepRecord` 逐 step 落盘 |
 | `agents/guard.py` | 守卫：六个 act 的逐条判据，全局状态的**唯一写者**（扩基线 / `freeze` / `register` / 投影 / 额度） |
-| `agents/meta.py` | 元智能体的**决策部分**（当前是规则骨架）+ `ActivationPlan` 的生产者 |
+| `agents/meta.py` | 元智能体的**决策部分**：规则骨架 + LLM 只补差集（三明治，D-102）+ `ActivationPlan` 的生产者 |
 | `agents/skills/` | **技能包**（目录形式）：`expert_review/` 带 `SKILL.md` + prompt/personas/runner，六个专家复用同一技能，差别只在 persona |
 | `workflow.py` | 外环：前段准备（意图 / 检索 / 落地等级）→ 调用元智能体循环 → 后段收尾（渲染 / 保证等级 / 振荡记录） |
 | `interface/cli.py` | 对话式命令行 |
@@ -259,9 +259,16 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **密钥不外泄**：key 只在 `config.py` 读成 `SecretStr`，不进 `repr` / `model_dump` / 事件日志；`scripts/check_secrets.py` 同时在**提交前**与 CI 扫描
 - **单向依赖**：见 §6，由测试守护，`contracts` 不 import 业务模块
 
+### 7.7 决策层与会话上下文
+
+- **决策部分是「三明治」**：规则骨架先出激活集与权重（可复现），LLM 只在**首轮之前**补一次差集——激活集、权重、证据子集分配；合并、校验、归一化由代码完成（只增不减、Σ=1、与基线求交），越界或不可用即退回纯骨架并落 `degradation` 事件（D-102）
+- **会话快照有真正的消费者**：元智能体的决策层（L1）与方案撰写者读它，跨对话轮的连续性因此成立；**评审专家仍然完全看不到会话历史**，这条由哨兵用例双向钉住（D-103）
+- **裁剪落事件**：证据子集一旦小于整份基线就落 `evidence_scope_trimmed`——它决定这一轮专家看到什么（§5.4.3 的 L3）
+- **可关、可降级**：`META_DECISION=rule` 时完全不发起那次调用；离线适配器返回**空差集**，因此 offline 产物与接入前逐字一致
+
 ---
 
-## 8. 尚未实现 / 未接线
+## 8. 尚未实现 / 待标定
 
 > 顺序已定（D-84）：**先 harness，后 kernel**。已完成的部分见 §7，以下均为**未完成**项。
 
@@ -273,12 +280,7 @@ interface → rag.factory → rag.retriever → rag.graph（复用 Cypher 与部
 - **后置 HITL 的交互**：`ask_human` 只登记待办，真正挂起要等 kernel
 - **OTel** 与**级联检测实验**：未开始
 
-### 8.2 已落地但未接线
-
-- **元智能体的 LLM 决策层**：激活集 / 权重 / 证据子集目前全部由确定性规则产出（`agents/meta.py`），「LLM 补差集」那一层未接，因此**行为与改造前等价**
-- **`run_input.session`（会话快照）**：契约里已有，但规则骨架用不到 L1，**尚无消费者**；子 agent 看不到会话历史这一点已由 `tests/test_session.py` 的哨兵用例钉住
-
-### 8.3 待标定
+### 8.2 待标定
 
 - **分歧归因阈值**（检测与记录已落地，Q-22）
 - **停滞 / 振荡阈值**（Q-17）
