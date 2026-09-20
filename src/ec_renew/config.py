@@ -90,7 +90,7 @@ class Settings(BaseModel):
 
     # ---- Corpus ----------------------------------------------------------
     data_dir: Path = Path("data")
-    corpus_file: str = "zahuo.txt"
+    corpus_file: str = "corpus.txt"
     # 变更单之间的分隔符（旧数据格式，正则）
     corpus_separator: str = r"!@#\$%\^&\*"
 
@@ -158,7 +158,7 @@ class Settings(BaseModel):
             vector_min_score=_f("VECTOR_MIN_SCORE", 0.0),
             kg_extractor=_s("KG_EXTRACTOR", "rule"),
             data_dir=Path(_s("DATA_DIR", "data")),
-            corpus_file=_s("CORPUS_FILE", "zahuo.txt"),
+            corpus_file=_s("CORPUS_FILE", "corpus.txt"),
             corpus_separator=_s("CORPUS_SEPARATOR", r"!@#\$%\^&\*"),
             max_rounds=_i("MAX_ROUNDS", 3),
             consensus_threshold=_f("CONSENSUS_THRESHOLD", 0.6),
