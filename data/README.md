@@ -12,15 +12,16 @@
 
 ## 自己准备语料
 
-把符合下面格式的文件放到本目录（默认文件名 `zahuo.txt`），即可跑通摄取与全部测试：
+把符合下面格式的文件放到 `DATA_DIR` 目录下、文件名取 `CORPUS_FILE`（两项都在 `.env`
+里配置，默认值见 `.env.example`），即可跑通摄取与全部测试：
 
 ```bash
-# 默认路径 data/zahuo.txt
+# 读取 DATA_DIR / CORPUS_FILE 指向的语料
 python -m ec_renew.rag.ingest
 
 # 或者用环境变量指到别处（.env）
 DATA_DIR=data
-CORPUS_FILE=zahuo.txt
+CORPUS_FILE=corpus.txt
 ```
 
 ## 文件格式

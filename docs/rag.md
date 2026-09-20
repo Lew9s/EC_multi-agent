@@ -12,7 +12,7 @@
 > `src/ec_renew/rag/`；领域图与 Cypher 在 `rag/graph.py`（原 `rag.py`）。
 
 ```
-data/zahuo.txt（变更单语料，!@#$%^&* 分隔；**不随仓库分发**，见 data/README.md）
+DATA_DIR/CORPUS_FILE 指向的变更单语料（!@#$%^&* 分隔；**不随仓库分发**，见 data/README.md）
         │
         ▼  corpus.py：一单一 Document，字段结构化 + disciplines 打标
    ┌──────────────────────────── IngestionPipeline ────────────────────────────┐
@@ -94,7 +94,7 @@ data/zahuo.txt（变更单语料，!@#$%^&* 分隔；**不随仓库分发**，�
 (:COMPONENT)-[:PART_OF]->(:COMPONENT)          ← 父结构（分段）
 ```
 
-实测规模（实验室语料 `data/zahuo.txt`，118 张变更单；该文件属业务数据，不进版本库）：
+实测规模（实验室语料 118 张变更单；语料属业务数据，不进版本库）：
 
 | | 数量 |
 | --- | --- |
@@ -255,7 +255,7 @@ docker compose up -d
 cp .env.example .env      # 然后填 DEEPSEEK_API_KEY / ZHIPU_API_KEY
 
 # 3) 自备语料（真实业务数据不进版本库，格式见 data/README.md）
-#    默认读 data/zahuo.txt，可用 DATA_DIR / CORPUS_FILE 覆盖
+#    读 DATA_DIR / CORPUS_FILE 指向的文件，两者都在 .env 里配置
 
 # 4) 摄取（首次会建集合、建约束、写图与向量）
 python -m ec_renew.rag.ingest

@@ -52,7 +52,7 @@ from ec_renew.rag.graph_store import (
 )
 from ec_renew.rag.retriever import rank_graph_rows, rrf_fuse
 
-CORPUS = "data/zahuo.txt"
+CORPUS = str(base_settings.data_dir / base_settings.corpus_file)
 SEPARATOR = r"!@#\$%\^&\*"
 # 集成用例的临时资源名**按进程区分**：固定名字下，并发的第二个 pytest 进程会
 # `recreate=True` 删掉第一个进程正在读的集合（Qdrant 404），或 purge 掉它尚在断言的
@@ -164,9 +164,9 @@ def test_disciplines_are_tagged_at_parse_time() -> None:
 
 
 def test_document_id_is_a_stable_uuid() -> None:
-    first = document_id("zahuo.txt", "H-01")
-    assert first == document_id("zahuo.txt", "H-01"), "重复摄取必须落在同一个点上"
-    assert first != document_id("zahuo.txt", "H-02")
+    first = document_id("corpus.txt", "H-01")
+    assert first == document_id("corpus.txt", "H-01"), "重复摄取必须落在同一个点上"
+    assert first != document_id("corpus.txt", "H-02")
     # Qdrant 的 point id 只接受 uint64 或 UUID
     assert str(uuid.UUID(first)) == first
 
